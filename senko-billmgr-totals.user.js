@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Senko BILLmanager: итоги по услугам
 // @namespace    https://github.com/dykomenko/senko-billmgr-totals
-// @version      1.1.0
-// @description  Под списком услуг в кабинете BILLmanager (my.senko.digital, my.waicore.com) показывает суммарную стоимость в месяц и сумму, которую нужно доплатить, чтобы всё работало ещё месяц.
+// @version      1.2.0
+// @description  Под списком услуг в кабинете BILLmanager (my.senko.digital, my.waicore.com, my.h2.nexus) показывает суммарную стоимость в месяц и сумму, которую нужно доплатить, чтобы всё работало ещё месяц.
 // @author       dykomenko
 // @license      MIT
 // @match        https://my.senko.digital/billmgr*
 // @match        https://my.waicore.com/billmgr*
+// @match        https://my.h2.nexus/billmgr*
 // @run-at       document-idle
 // @noframes
 // @grant        none
@@ -346,10 +347,13 @@
     return match ? parseInt(match[0], 10) : null;
   }
 
+  // <isp-balance> renders the amount in one of two elements: the plain one, or, for accounts
+  // with a credit limit, the "with-credit" variant that also carries credit/late-payment text.
   function readBalance() {
     const root = document.querySelector('isp-balance');
     if (!root) return null;
-    return parseMoney(textOf(root.querySelector('[class*="__amount"]') || root));
+    const amount = root.querySelector('.isp-balance-without-credit__amount, .isp-balance-with-credit__balance');
+    return parseMoney(textOf(amount || root));
   }
 
   function render(panel, view) {

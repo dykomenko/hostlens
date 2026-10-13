@@ -6,6 +6,7 @@ Userscript для [Tampermonkey](https://www.tampermonkey.net/), который 
 
 - `my.senko.digital/billmgr`
 - `my.waicore.com/billmgr`
+- `my.h2.nexus/billmgr`
 
 Панель показывает:
 
