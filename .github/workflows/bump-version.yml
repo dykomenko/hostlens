@@ -8,7 +8,7 @@ on:
   push:
     branches: [main]
     paths:
-      - senko-billmgr-totals.user.js
+      - hostlens.user.js
 
 permissions:
   contents: write

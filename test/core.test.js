@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const core = require('../senko-billmgr-totals.user.js');
+const core = require('../hostlens.user.js');
 
 const date = (y, m, d) => new Date(y, m - 1, d);
 const TODAY = date(2026, 10, 5);
@@ -140,4 +140,57 @@ test('formatting helpers', () => {
   assert.equal(core.daysUntil(date(2026, 10, 20), TODAY), 'через 15 дн.');
   assert.equal(core.daysUntil(TODAY, TODAY), 'сегодня');
   assert.equal(core.daysUntil(date(2026, 10, 3), TODAY), 'просрочено на 2 дн.');
+});
+
+test('parsePeriod reads WHMCS cycles', () => {
+  assert.deepEqual(core.parsePeriod('Monthly'), { months: 1, days: 0 });
+  assert.deepEqual(core.parsePeriod('Quarterly'), { months: 3, days: 0 });
+  assert.deepEqual(core.parsePeriod('Semi-Annually'), { months: 6, days: 0 });
+  assert.deepEqual(core.parsePeriod('Annually'), { months: 12, days: 0 });
+  assert.deepEqual(core.parsePeriod('Biennially'), { months: 24, days: 0 });
+  assert.deepEqual(core.parsePeriod('One Time'), { months: 0, days: 0, once: true });
+  assert.deepEqual(core.parsePeriod('Free Account'), { months: 0, days: 0, once: true });
+});
+
+test('WHMCS style prices: decimal comma and a currency code', () => {
+  assert.deepEqual(core.parseMoney('6,25 EUR'), { cents: 625, currency: '€' });
+  const cost = core.parseCost('12,00 EUR / Quarterly');
+  assert.equal(cost.cents, 1200);
+  assert.deepEqual(cost.period, { months: 3, days: 0 });
+});
+
+test('analyze: quarterly service is normalised to a month and renewed as a whole quarter', () => {
+  const rows = [row('q', '2026-10-20', '12,00 EUR / Quarterly')];
+  const result = core.analyze(rows, { today: TODAY, months: 1, balance: null });
+  assert.deepEqual(result.monthly, { '€': 400 });
+  assert.deepEqual(result.due, { '€': 1200 });
+});
+
+test('analyze: terminated and cancelled services are ignored, one-time ones cost nothing monthly', () => {
+  const rows = [
+    row('a', '2026-10-20', '4,00 EUR / Monthly', 'Active'),
+    row('b', '2025-09-10', '6,25 EUR / Monthly', 'Terminated'),
+    row('c', '2025-09-10', '6,25 EUR / Monthly', 'Cancelled'),
+    row('d', '', '9,00 EUR / One Time', 'Active'),
+  ];
+  const result = core.analyze(rows, { today: TODAY, months: 1, balance: null });
+  assert.equal(result.items.length, 2);
+  assert.deepEqual(result.monthly, { '€': 400 });
+  assert.deepEqual(result.due, { '€': 400 });
+});
+
+test('extractIps finds IPv4 and IPv6 and ignores prices and versions', () => {
+  assert.deepEqual(core.extractIps('Primary IP 203.0.113.7'), ['203.0.113.7']);
+  assert.deepEqual(core.extractIps('203.0.113.7, 198.51.100.2/32; 2001:db8::1'), ['203.0.113.7', '198.51.100.2/32', '2001:db8::1']);
+  assert.deepEqual(core.extractIps('v4.0.4 6,25 EUR 999.1.1.1'), []);
+});
+
+test('parseTrafficValue turns used / total into a percentage', () => {
+  const t = core.parseTrafficValue('2048MB / 1048576MB');
+  assert.equal(t.percentText, '0%');
+  assert.equal(t.usedText, '2048 MB');
+  assert.equal(t.totalText, '1048576 MB');
+  assert.equal(core.parseTrafficValue('5 GB / 10 GB').percentText, '50%');
+  assert.equal(core.parseTrafficValue('512 MB / 1 GB').percentText, '50%');
+  assert.equal(core.parseTrafficValue('no data'), null);
 });

@@ -6,7 +6,7 @@
 # Usage: bump-version.sh <sha-before-push>
 set -euo pipefail
 
-file="senko-billmgr-totals.user.js"
+file="hostlens.user.js"
 before="${1:-}"
 
 read_version() {
