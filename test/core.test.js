@@ -224,3 +224,11 @@ test('formatNetplan indents list items with exactly eight spaces and has no trai
   assert.equal(text, [10, 11, 12, 13, 14].map((n) => `        - 203.0.113.${n}/29`).join('\n'));
   assert.ok(!text.endsWith('\n'));
 });
+
+test('formatNetplan: the quoted Ubuntu style uses six spaces and quotes every address', () => {
+  const subnet = core.subnetHosts('203.0.113.8/29', '203.0.113.9');
+  const lines = core.formatNetplan(subnet, { indent: 6, quote: true }).split('\n');
+  assert.equal(lines[0], '      - "203.0.113.10/29"');
+  assert.equal(lines.length, 5);
+  assert.equal(core.formatNetplan(subnet).split('\n')[0], '        - 203.0.113.10/29');
+});
