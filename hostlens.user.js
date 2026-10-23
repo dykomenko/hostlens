@@ -349,7 +349,7 @@
   const intToIp = (n) => [24, 16, 8, 0].map((shift) => (n >>> shift) & 255).join('.');
 
   // Every address of the subnet except the network, the broadcast and the gateway
-  // (88.216.60.152/29 with gateway .153 -> .154 ... .158). Without a known gateway, network + 1 is assumed.
+  // (203.0.113.8/29 with gateway .9 -> .10 ... .14). Without a known gateway, network + 1 is assumed.
   function subnetHosts(cidr, gateway) {
     const match = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/.exec(String(cidr || '').trim());
     if (!match || !isIpv4(match[1])) return null;
