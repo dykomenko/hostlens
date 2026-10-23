@@ -1395,7 +1395,57 @@
       }
     }
 
+    /* ---- a faint casino pattern behind the page ---- */
+
+    const SYMBOLS = `
+      <path id="h" d="M0 11C-8 4-11 0-11-3.5-11-7-8.2-9-5.5-9-3-9-1-7.5 0-5.5 1-7.5 3-9 5.5-9 8.2-9 11-7 11-3.5 11 0 8 4 0 11Z"/>
+      <path id="d" d="M0-11L9 0 0 11-9 0Z"/>
+      <g id="s"><path d="M0-11C-8-4-11 0-11 3.5-11 7-8.2 9-5.5 9-3 9-1 7.5 0 5.5 1 7.5 3 9 5.5 9 8.2 9 11 7 11 3.5 11 0 8-4 0-11Z"/><path d="M0 4L-3.5 12H3.5Z"/></g>
+      <g id="c"><circle cy="-5.5" r="5"/><circle cx="-5.5" cy="3" r="5"/><circle cx="5.5" cy="3" r="5"/><path d="M0 3L-3.5 12H3.5Z"/></g>
+      <g id="k" fill="none"><circle r="11" stroke-width="3" stroke-dasharray="6 5.6"/><circle r="6" stroke-width="1.5"/></g>
+      <g id="x"><rect x="-10" y="-10" width="20" height="20" rx="4" fill="none" stroke-width="2"/><circle cx="-5" cy="-5" r="1.8"/><circle cx="5" cy="-5" r="1.8"/><circle r="1.8"/><circle cx="-5" cy="5" r="1.8"/><circle cx="5" cy="5" r="1.8"/></g>
+      <text id="n" font-family="Georgia,serif" font-weight="700" font-size="26" text-anchor="middle" dominant-baseline="central">7</text>`;
+
+    // [symbol, x, y, rotation, scale, color]; outlined symbols need a stroke as well as a fill.
+    const RED = '#e11d48';
+    const INK = '#111827';
+    const SCATTER = [
+      ['h', 40, 42, -15, 1.4, RED], ['s', 122, 46, 10, 1.3, INK], ['x', 196, 34, 18, 1.1, INK],
+      ['d', 28, 124, 8, 1.2, RED], ['k', 100, 124, 0, 1.3, RED], ['n', 176, 128, 9, 1.1, INK],
+      ['c', 44, 206, -8, 1.3, INK], ['n', 120, 208, -12, 1, RED], ['h', 196, 204, 14, 1.2, INK],
+    ];
+
+    function casinoBackground() {
+      const outlined = new Set(['k', 'x']);
+      const uses = SCATTER.map(([id, x, y, rotation, scale, color]) =>
+        `<use href="#${id}" transform="translate(${x} ${y}) rotate(${rotation}) scale(${scale})" fill="${color}"` +
+        `${outlined.has(id) ? ` stroke="${color}"` : ''}/>`).join('');
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">` +
+        `<defs>${SYMBOLS}</defs><g opacity=".075">${uses}</g></svg>`;
+      return `body { background-image: url("data:image/svg+xml,${encodeURIComponent(svg)}") !important; background-size: 240px 240px !important; }`;
+    }
+
+    function applyBackground() {
+      let style = document.getElementById('hl-bg');
+      if (!store.get('cherryBackground', true)) {
+        if (style) style.remove();
+        return;
+      }
+      if (!style) {
+        style = h('style', { id: 'hl-bg' });
+        document.head.append(style);
+      }
+      style.textContent = casinoBackground();
+    }
+
     injectStyles();
+    applyBackground();
+    if (typeof GM_registerMenuCommand === 'function') {
+      GM_registerMenuCommand('Фон Cherry: показать/скрыть', () => {
+        store.set('cherryBackground', !store.get('cherryBackground', true));
+        applyBackground();
+      });
+    }
     watchPage(scan, 200);
   }
 
