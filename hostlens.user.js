@@ -1404,7 +1404,8 @@
       <g id="c"><circle cy="-5.5" r="5"/><circle cx="-5.5" cy="3" r="5"/><circle cx="5.5" cy="3" r="5"/><path d="M0 3L-3.5 12H3.5Z"/></g>
       <g id="k" fill="none"><circle r="11" stroke-width="3" stroke-dasharray="6 5.6"/><circle r="6" stroke-width="1.5"/></g>
       <g id="x"><rect x="-10" y="-10" width="20" height="20" rx="4" fill="none" stroke-width="2"/><circle cx="-5" cy="-5" r="1.8"/><circle cx="5" cy="-5" r="1.8"/><circle r="1.8"/><circle cx="-5" cy="5" r="1.8"/><circle cx="5" cy="5" r="1.8"/></g>
-      <text id="n" font-family="Georgia,serif" font-weight="700" font-size="26" text-anchor="middle" dominant-baseline="central">7</text>`;
+      <text id="n" font-family="Georgia,serif" font-weight="700" font-size="26" text-anchor="middle" dominant-baseline="central">7</text>
+      <text id="f" font-family="Georgia,serif" font-weight="700" font-size="26" text-anchor="middle" dominant-baseline="central">4</text>`;
 
     // [symbol, x, y, rotation, scale, color]; outlined symbols need a stroke as well as a fill.
     const RED = '#e11d48';
@@ -1412,7 +1413,8 @@
     const SCATTER = [
       ['h', 40, 42, -15, 1.4, RED], ['s', 122, 46, 10, 1.3, INK], ['x', 196, 34, 18, 1.1, INK],
       ['d', 28, 124, 8, 1.2, RED], ['k', 100, 124, 0, 1.3, RED], ['n', 176, 128, 9, 1.1, INK],
-      ['c', 44, 206, -8, 1.3, INK], ['n', 120, 208, -12, 1, RED], ['h', 196, 204, 14, 1.2, INK],
+      ['c', 44, 206, -8, 1.3, INK], ['f', 120, 208, -12, 1, RED], ['h', 196, 204, 14, 1.2, INK],
+      ['n', 84, 172, 6, 0.9, RED],
     ];
 
     function casinoBackground() {
@@ -1421,7 +1423,7 @@
         `<use href="#${id}" transform="translate(${x} ${y}) rotate(${rotation}) scale(${scale})" fill="${color}"` +
         `${outlined.has(id) ? ` stroke="${color}"` : ''}/>`).join('');
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">` +
-        `<defs>${SYMBOLS}</defs><g opacity=".075">${uses}</g></svg>`;
+        `<defs>${SYMBOLS}</defs><g opacity=".055">${uses}</g></svg>`;
       return `body { background-image: url("data:image/svg+xml,${encodeURIComponent(svg)}") !important; background-size: 240px 240px !important; }`;
     }
 
