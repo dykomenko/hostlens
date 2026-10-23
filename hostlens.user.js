@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         HostLens: итоги, IP и трафик в кабинетах хостингов
 // @namespace    https://github.com/dykomenko/hostlens
-// @version      2.0.0
-// @description  Дополняет кабинеты хостингов: суммарная стоимость, сколько доплатить, чтобы всё работало ещё месяц (BILLmanager: Senko, WAIcore, H2 Nexus; WHMCS: Avoro), а в списке услуг Avoro ещё IP, трафик и срок оплаты.
+// @version      2.1.0
+// @description  Дополняет кабинеты хостингов: суммарная стоимость, сколько доплатить, чтобы всё работало ещё месяц (BILLmanager: Senko, WAIcore, H2 Nexus; WHMCS: Avoro), в списке услуг Avoro ещё IP, трафик и срок оплаты, а у подсетей Cherry Servers кнопка копирования IP для netplan.
 // @author       dykomenko
 // @license      MIT
 // @match        https://my.senko.digital/billmgr*
 // @match        https://my.waicore.com/billmgr*
 // @match        https://my.h2.nexus/billmgr*
 // @match        https://avoro.eu/cp/clientarea.php*
+// @match        https://portal.cherryservers.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_xmlhttpRequest
@@ -342,12 +343,37 @@
     };
   }
 
+  /* ---- subnets (Cherry Servers): which addresses are usable and how netplan wants them ---- */
+
+  const ipToInt = (ip) => ip.split('.').reduce((acc, octet) => acc * 256 + Number(octet), 0);
+  const intToIp = (n) => [24, 16, 8, 0].map((shift) => (n >>> shift) & 255).join('.');
+
+  // Every address of the subnet except the network, the broadcast and the gateway
+  // (88.216.60.152/29 with gateway .153 -> .154 ... .158). Without a known gateway, network + 1 is assumed.
+  function subnetHosts(cidr, gateway) {
+    const match = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/.exec(String(cidr || '').trim());
+    if (!match || !isIpv4(match[1])) return null;
+    const prefix = Number(match[2]);
+    if (prefix < 16 || prefix > 32) return null;
+
+    const size = 2 ** (32 - prefix);
+    const base = Math.floor(ipToInt(match[1]) / size) * size;
+    const skip = new Set([base, base + size - 1, gateway && isIpv4(gateway) ? ipToInt(gateway) : base + 1]);
+
+    const hosts = [];
+    for (let n = base; n < base + size; n++) if (!skip.has(n)) hosts.push(intToIp(n));
+    return { hosts, prefix };
+  }
+
+  // The "addresses:" list items of a netplan file, indented with 8 spaces.
+  const formatNetplan = ({ hosts, prefix }) => hosts.map((ip) => `        - ${ip}/${prefix}`).join('\n');
+
   if (typeof module !== 'undefined' && typeof document === 'undefined') {
     // Loaded by the unit tests in Node, not by Tampermonkey.
     module.exports = {
       parseMoney, parsePeriod, parseCost, parseDate, addMonths, renewalsNeeded, analyze,
       formatMoney, formatMoneyMap, formatDate, plural, daysUntil,
-      extractIps, parseTrafficValue,
+      extractIps, parseTrafficValue, subnetHosts, formatNetplan,
     };
     return;
   }
@@ -452,6 +478,12 @@
     .hl-refresh:hover { opacity: 1; background: rgba(127, 127, 127, .16); }
     .hl-refresh.hl-spin { animation: hl-spin .8s linear infinite; opacity: .8; }
     @keyframes hl-spin { to { transform: rotate(360deg); } }
+    .hl-copy {
+      margin: 0 0 0 8px; padding: 0 8px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; color: #374151;
+      font: 500 12px/22px system-ui, -apple-system, Segoe UI, sans-serif; cursor: pointer; white-space: nowrap;
+    }
+    .hl-copy:hover { border-color: #9ca3af; background: #f3f4f6; }
+    .hl-copy.hl-ok { border-color: rgba(22, 163, 74, .7); background: rgba(22, 163, 74, .12); color: #166534; }
     .hl-toast {
       position: fixed; left: 50%; bottom: 24px; z-index: 2147483647; transform: translate(-50%, 8px);
       max-width: calc(100vw - 32px); padding: 8px 14px; border-radius: 8px; background: #111827; color: #fff;
@@ -484,7 +516,7 @@
 
   const insideOurs = (node) => {
     const element = node.nodeType === 1 ? node : node.parentElement;
-    return !!element && !!element.closest('.' + PANEL_CLASS + ', .hl-box');
+    return !!element && !!element.closest('.' + PANEL_CLASS + ', .hl-box, .hl-copy');
   };
 
   // Calls `run` at most once per `delay` while the page keeps changing, ignoring our own DOM edits.
@@ -506,6 +538,50 @@
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
     schedule();
     return schedule;
+  }
+
+  /* ---- small DOM helpers: element factory, toast, clipboard ---- */
+
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  };
+
+  let toastNode = null;
+  let toastTimer = null;
+
+  function showToast(text) {
+    if (!toastNode) {
+      toastNode = el('div', 'hl-toast');
+      document.body.appendChild(toastNode);
+    }
+    toastNode.textContent = text;
+    void toastNode.offsetWidth; // restart the transition on repeated toasts
+    toastNode.classList.add('hl-show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastNode.classList.remove('hl-show'), 1600);
+  }
+
+  async function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return;
+    }
+    await navigator.clipboard.writeText(text);
+  }
+
+  async function copyWithFeedback(text, flashNode, flashClass) {
+    try {
+      await copyText(text);
+      showToast('Скопировано:\n' + text);
+      flashNode.classList.add(flashClass);
+      setTimeout(() => flashNode.classList.remove(flashClass), 700);
+    } catch (err) {
+      console.error(err);
+      showToast('Не удалось скопировать');
+    }
   }
 
   /* ---- the totals panel, shared by every site ---- */
@@ -1087,13 +1163,6 @@
 
     /* ---- the per-service box ---- */
 
-    const el = (tag, className, text) => {
-      const node = document.createElement(tag);
-      if (className) node.className = className;
-      if (text !== undefined && text !== null) node.textContent = text;
-      return node;
-    };
-
     const trafficColor = (percent) => (!isFinite(percent) ? '#9ca3af' : percent < 60 ? '#16a34a' : percent < 85 ? '#d97706' : '#dc2626');
 
     function formatAge(ts) {
@@ -1103,41 +1172,6 @@
       if (minutes < 60) return `${minutes} мин назад`;
       const hours = Math.round(minutes / 60);
       return hours < 48 ? `${hours} ч назад` : `${Math.round(hours / 24)} дн назад`;
-    }
-
-    let toastNode = null;
-    let toastTimer = null;
-
-    function showToast(text) {
-      if (!toastNode) {
-        toastNode = el('div', 'hl-toast');
-        document.body.appendChild(toastNode);
-      }
-      toastNode.textContent = text;
-      void toastNode.offsetWidth; // restart the transition on repeated toasts
-      toastNode.classList.add('hl-show');
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => toastNode.classList.remove('hl-show'), 1600);
-    }
-
-    async function copyText(text) {
-      if (typeof GM_setClipboard === 'function') {
-        GM_setClipboard(text, 'text');
-        return;
-      }
-      await navigator.clipboard.writeText(text);
-    }
-
-    async function copyWithFeedback(text, flashNode, flashClass) {
-      try {
-        await copyText(text);
-        showToast('Скопировано:\n' + text);
-        flashNode.classList.add(flashClass);
-        setTimeout(() => flashNode.classList.remove(flashClass), 700);
-      } catch (err) {
-        console.error(err);
-        showToast('Не удалось скопировать');
-      }
     }
 
     function makeRow(label) {
@@ -1310,8 +1344,64 @@
     });
   }
 
+  /* ------------------------------------------------------------------ *
+   * Adapter: Cherry Servers portal (Vue SPA): "copy for netplan" on every public IPv4 subnet
+   * ------------------------------------------------------------------ */
+
+  function runCherry() {
+    const SUBNET_LINK = /\/network\/subnets\/\d+/;
+    const CIDR = /^(?:\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
+
+    // A subnet card is a link to /network/subnets/<id>; the CIDR is the only element whose whole text is a
+    // network in CIDR notation, and the gateway follows a "Gateway:" label.
+    function readSubnet(card) {
+      const node = [...card.querySelectorAll('div, span')].find((n) => !n.children.length && CIDR.test(textOf(n)));
+      if (!node) return null;
+      const gateway = /Gateway:?\s*((?:\d{1,3}\.){3}\d{1,3})/i.exec(textOf(card));
+      const subnet = subnetHosts(textOf(node), gateway && gateway[1]);
+      return subnet && { node, subnet };
+    }
+
+    function scan() {
+      for (const card of document.querySelectorAll('a[href]')) {
+        if (!SUBNET_LINK.test(card.getAttribute('href'))) continue;
+        const found = readSubnet(card);
+        const existing = card.querySelector('.hl-copy');
+        if (!found) {
+          if (existing) existing.remove(); // Vue reuses nodes, e.g. when switching from IPv4 to IPv6
+          continue;
+        }
+        if (existing) continue;
+
+        const button = el('button', 'hl-copy', 'netplan');
+        button.type = 'button';
+        button.title = `Скопировать ${found.subnet.hosts.length} IP в формате netplan`;
+        button.addEventListener('click', (e) => {
+          // The whole card is a link; keep the click away from it.
+          e.preventDefault();
+          e.stopPropagation();
+          const current = readSubnet(card); // read again: the card may have been reused for another subnet
+          if (!current) return;
+          copyText(formatNetplan(current.subnet)).then(
+            () => {
+              showToast(`Скопировано ${current.subnet.hosts.length} IP для netplan`);
+              button.classList.add('hl-ok');
+              setTimeout(() => button.classList.remove('hl-ok'), 700);
+            },
+            () => showToast('Не удалось скопировать'),
+          );
+        });
+        found.node.after(button);
+      }
+    }
+
+    injectStyles();
+    watchPage(scan, 200);
+  }
+
   /* ------------------------------------------------------------------ */
 
   if (location.hostname === 'avoro.eu') runAvoro();
+  else if (location.hostname === 'portal.cherryservers.com') runCherry();
   else runBillmanager();
 })();

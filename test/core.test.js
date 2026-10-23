@@ -194,3 +194,33 @@ test('parseTrafficValue turns used / total into a percentage', () => {
   assert.equal(core.parseTrafficValue('512 MB / 1 GB').percentText, '50%');
   assert.equal(core.parseTrafficValue('no data'), null);
 });
+
+test('subnetHosts: every address except network, broadcast and gateway', () => {
+  const { hosts, prefix } = core.subnetHosts('203.0.113.8/29', '203.0.113.9');
+  assert.equal(prefix, 29);
+  assert.deepEqual(hosts, ['203.0.113.10', '203.0.113.11', '203.0.113.12', '203.0.113.13', '203.0.113.14']);
+});
+
+test('subnetHosts: gateway is excluded wherever it is, and defaults to network + 1', () => {
+  assert.deepEqual(core.subnetHosts('203.0.113.8/29', '203.0.113.14').hosts,
+    ['203.0.113.9', '203.0.113.10', '203.0.113.11', '203.0.113.12', '203.0.113.13']);
+  assert.deepEqual(core.subnetHosts('203.0.113.8/29').hosts,
+    ['203.0.113.10', '203.0.113.11', '203.0.113.12', '203.0.113.13', '203.0.113.14']);
+});
+
+test('subnetHosts: other sizes, host bits in the address and bad input', () => {
+  assert.equal(core.subnetHosts('203.0.113.0/28', '203.0.113.1').hosts.length, 13);
+  assert.equal(core.subnetHosts('203.0.113.4/30', '203.0.113.5').hosts.length, 1);
+  assert.deepEqual(core.subnetHosts('203.0.113.11/29', '203.0.113.9').hosts[0], '203.0.113.10'); // 11 is inside 8/29
+  assert.deepEqual(core.subnetHosts('203.0.113.255/24', '203.0.113.1').hosts.length, 253);
+  assert.equal(core.subnetHosts('2001:db8::/64'), null);
+  assert.equal(core.subnetHosts('203.0.113.8'), null);
+  assert.equal(core.subnetHosts('203.0.113.8/8'), null); // too big to list
+  assert.equal(core.subnetHosts('999.0.113.8/29'), null);
+});
+
+test('formatNetplan indents list items with exactly eight spaces and has no trailing newline', () => {
+  const text = core.formatNetplan(core.subnetHosts('203.0.113.8/29', '203.0.113.9'));
+  assert.equal(text, [10, 11, 12, 13, 14].map((n) => `        - 203.0.113.${n}/29`).join('\n'));
+  assert.ok(!text.endsWith('\n'));
+});
