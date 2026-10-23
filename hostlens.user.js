@@ -365,8 +365,10 @@
     return { hosts, prefix };
   }
 
-  // The "addresses:" list items of a netplan file, indented with 8 spaces.
-  const formatNetplan = ({ hosts, prefix }) => hosts.map((ip) => `        - ${ip}/${prefix}`).join('\n');
+  // The "addresses:" list items of a netplan file: plain with 8 spaces by default, or the Ubuntu style
+  // with 6 spaces and quoted addresses.
+  const formatNetplan = ({ hosts, prefix }, { indent = 8, quote = false } = {}) =>
+    hosts.map((ip) => `${' '.repeat(indent)}- ${quote ? '"' : ''}${ip}/${prefix}${quote ? '"' : ''}`).join('\n');
 
   if (typeof module !== 'undefined' && typeof document === 'undefined') {
     // Loaded by the unit tests in Node, not by Tampermonkey.
@@ -1362,36 +1364,51 @@
       return subnet && { node, subnet };
     }
 
+    // Two list styles: plain (8 spaces) and the quoted Ubuntu one (6 spaces).
+    const VARIANTS = [
+      { label: 'netplan', options: { indent: 8, quote: false }, hint: 'пункты списка с отступом 8 пробелов' },
+      { label: 'ubuntu', options: { indent: 6, quote: true }, hint: 'адреса в кавычках, отступ 6 пробелов' },
+    ];
+
+    function makeButton(card, variant, count) {
+      const button = el('button', 'hl-copy', variant.label);
+      button.type = 'button';
+      button.title = `Скопировать ${count} IP: ${variant.hint}`;
+      button.addEventListener('click', (e) => {
+        // The whole card is a link; keep the click away from it.
+        e.preventDefault();
+        e.stopPropagation();
+        const current = readSubnet(card); // read again: the card may have been reused for another subnet
+        if (!current) return;
+        copyText(formatNetplan(current.subnet, variant.options)).then(
+          () => {
+            showToast(`Скопировано ${current.subnet.hosts.length} IP (${variant.label})`);
+            button.classList.add('hl-ok');
+            setTimeout(() => button.classList.remove('hl-ok'), 700);
+          },
+          () => showToast('Не удалось скопировать'),
+        );
+      });
+      return button;
+    }
+
     function scan() {
       for (const card of document.querySelectorAll('a[href]')) {
         if (!SUBNET_LINK.test(card.getAttribute('href'))) continue;
         const found = readSubnet(card);
-        const existing = card.querySelector('.hl-copy');
+        const existing = card.querySelectorAll('.hl-copy');
         if (!found) {
-          if (existing) existing.remove(); // Vue reuses nodes, e.g. when switching from IPv4 to IPv6
+          existing.forEach((button) => button.remove()); // Vue reuses nodes, e.g. when switching from IPv4 to IPv6
           continue;
         }
-        if (existing) continue;
+        if (existing.length) continue;
 
-        const button = el('button', 'hl-copy', 'netplan');
-        button.type = 'button';
-        button.title = `Скопировать ${found.subnet.hosts.length} IP в формате netplan`;
-        button.addEventListener('click', (e) => {
-          // The whole card is a link; keep the click away from it.
-          e.preventDefault();
-          e.stopPropagation();
-          const current = readSubnet(card); // read again: the card may have been reused for another subnet
-          if (!current) return;
-          copyText(formatNetplan(current.subnet)).then(
-            () => {
-              showToast(`Скопировано ${current.subnet.hosts.length} IP для netplan`);
-              button.classList.add('hl-ok');
-              setTimeout(() => button.classList.remove('hl-ok'), 700);
-            },
-            () => showToast('Не удалось скопировать'),
-          );
-        });
-        found.node.after(button);
+        let anchor = found.node;
+        for (const variant of VARIANTS) {
+          const button = makeButton(card, variant, found.subnet.hosts.length);
+          anchor.after(button);
+          anchor = button;
+        }
       }
     }
 
