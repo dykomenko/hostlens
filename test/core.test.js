@@ -232,3 +232,44 @@ test('formatNetplan: the quoted Ubuntu style uses six spaces and quotes every ad
   assert.equal(lines.length, 5);
   assert.equal(core.formatNetplan(subnet).split('\n')[0], '        - 203.0.113.10/29');
 });
+
+const it = (name, expire, cost) => ({ name, expire: core.parseDate(expire), cost: core.parseCost(cost) });
+const BAL = (cents) => ({ cents, currency: '€' });
+
+test('runway: the first charge the balance cannot cover is the first outage', () => {
+  const items = [it('a', '2026-10-20', '4.00 € / Месяц'), it('b', '2026-10-22', '8.50 € / Месяц')];
+  const r = core.runway(items, { today: TODAY, balance: BAL(1000) });
+  assert.deepEqual(r.outage, date(2026, 10, 22));
+  assert.equal(r.short, 250);
+  assert.deepEqual(r.names, ['b']);
+});
+
+test('runway: charges due on the same day are added up', () => {
+  const items = [it('a', '2026-10-20', '4.00 € / Месяц'), it('b', '2026-10-20', '8.00 € / Месяц')];
+  const r = core.runway(items, { today: TODAY, balance: BAL(1000) });
+  assert.deepEqual(r.outage, date(2026, 10, 20));
+  assert.deepEqual(r.names, ['b', 'a']);
+});
+
+test('runway: recurring charges eat the balance month after month', () => {
+  const items = [it('a', '2026-10-20', '4.00 € / Месяц')];
+  assert.deepEqual(core.runway(items, { today: TODAY, balance: BAL(1000) }).outage, date(2026, 12, 20));
+  assert.deepEqual(core.runway(items, { today: TODAY, balance: BAL(0) }).outage, date(2026, 10, 20));
+});
+
+test('runway: a big balance covers the whole look-ahead window', () => {
+  const items = [it('a', '2026-10-20', '4.00 € / Месяц')];
+  assert.deepEqual(core.runway(items, { today: TODAY, balance: BAL(100000) }), { outage: null, short: 0, names: [] });
+});
+
+test('runway: an expired service is charged today; no balance or foreign currency gives nothing', () => {
+  assert.deepEqual(core.runway([it('a', '2026-09-01', '4.00 € / Месяц')], { today: TODAY, balance: BAL(100) }).outage, TODAY);
+  assert.equal(core.runway([it('a', '2026-10-20', '4.00 € / Месяц')], { today: TODAY, balance: null }), null);
+  assert.equal(core.runway([it('a', '2026-10-20', '4.00 € / Месяц')], { today: TODAY, balance: { cents: 1000, currency: '₽' } }), null);
+});
+
+test('analyze exposes the runway', () => {
+  const rows = [row('a', '2026-10-20', '4.00 € / Месяц')];
+  const result = core.analyze(rows, { today: TODAY, months: 1, balance: BAL(500) });
+  assert.deepEqual(result.runway.outage, date(2026, 11, 20));
+});

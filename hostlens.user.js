@@ -154,6 +154,46 @@
     return n;
   }
 
+  const RUNWAY_MONTHS = 36;
+
+  /**
+   * How long the balance lasts: walks through every future charge (each service is billed on its
+   * expiry date and then once per period), most recent last, and finds the first day on which the
+   * charges due that day exceed what is left. Returns null without a usable balance, otherwise
+   * { outage: Date | null, short, names }; `outage` is null when everything is covered for 36 months.
+   */
+  function runway(items, { today, balance }) {
+    if (!balance) return null;
+    const limit = addMonths(today, RUNWAY_MONTHS);
+    const events = [];
+
+    for (const { name, expire, cost } of items) {
+      if (!expire || cost.period.once || !cost.cents) continue;
+      if (balance.currency && cost.currency && balance.currency !== cost.currency) continue;
+      let when = expire < today ? today : expire; // an expired service is paid for today, not from its old date
+      for (let n = 0; when < limit && n < MAX_RENEWALS; n++) {
+        events.push({ when, name, cents: cost.cents });
+        when = addPeriod(when, cost.period);
+      }
+    }
+    if (!events.length) return null;
+
+    events.sort((a, b) => a.when - b.when);
+    let left = balance.cents;
+    for (let i = 0; i < events.length;) {
+      let j = i;
+      let total = 0;
+      while (j < events.length && events[j].when.getTime() === events[i].when.getTime()) total += events[j++].cents;
+      if (total > left) {
+        const names = events.slice(i, j).sort((a, b) => b.cents - a.cents).map((e) => e.name);
+        return { outage: events[i].when, short: total - left, names };
+      }
+      left -= total;
+      i = j;
+    }
+    return { outage: null, short: 0, names: [] };
+  }
+
   const sumInto = (map, key, value) => {
     map[key] = (map[key] || 0) + value;
   };
@@ -208,6 +248,7 @@
       monthly: roundMap(monthly),
       due,
       topUp,
+      runway: runway(items, { today, balance }),
       dueCount: items.filter((i) => i.renewals > 0).length,
       nextExpiry,
       issues,
@@ -373,7 +414,7 @@
   if (typeof module !== 'undefined' && typeof document === 'undefined') {
     // Loaded by the unit tests in Node, not by Tampermonkey.
     module.exports = {
-      parseMoney, parsePeriod, parseCost, parseDate, addMonths, renewalsNeeded, analyze,
+      parseMoney, parsePeriod, parseCost, parseDate, addMonths, renewalsNeeded, runway, analyze,
       formatMoney, formatMoneyMap, formatDate, plural, daysUntil,
       extractIps, parseTrafficValue, subnetHosts, formatNetplan,
     };
@@ -588,6 +629,24 @@
 
   /* ---- the totals panel, shared by every site ---- */
 
+  // "How long until the first service switches off at the current balance".
+  function runwayTile(runway, today) {
+    if (!runway) return null;
+    const label = h('div', { class: 'hl-label' }, 'Баланса хватит до');
+    if (!runway.outage) {
+      return h('div', { class: 'hl-tile' }, label,
+        h('div', { class: 'hl-value hl-value--ok' }, `✓ ${RUNWAY_MONTHS / 12}+ года`),
+        h('div', { class: 'hl-sub' }, 'все продления покрыты'));
+    }
+    const days = daysBetween(runway.outage, today);
+    const extra = runway.names.length - 2;
+    const names = runway.names.slice(0, 2).join(', ') + (extra > 0 ? ` и ещё ${extra}` : '');
+    return h('div', { class: 'hl-tile' }, label,
+      h('div', { class: 'hl-value' + (days <= 7 ? ' hl-value--due' : '') }, formatDate(runway.outage)),
+      h('div', { class: 'hl-sub' }, `${daysUntil(runway.outage, today)} · первое отключение`),
+      h('div', { class: 'hl-sub' }, `не хватит на: ${names}`));
+  }
+
   // view: { model, balance, today, notes: [string] }
   function renderPanel(panel, view) {
     const { model, balance, today, notes } = view;
@@ -632,6 +691,7 @@
         h('div', { class: 'hl-label' }, 'Баланс'),
         h('div', { class: 'hl-value' }, balance ? formatMoney(balance.cents, balance.currency) : '—'),
         !balance && h('div', { class: 'hl-sub' }, 'не найден на странице')),
+      runwayTile(model.runway, today),
       h('div', { class: 'hl-tile' },
         h('div', { class: 'hl-label' }, 'Пополнить на'),
         covered
