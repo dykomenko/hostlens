@@ -412,12 +412,15 @@
   const formatNetplan = ({ hosts, prefix }, { indent = 8, quote = false } = {}) =>
     hosts.map((ip) => `${' '.repeat(indent)}- ${quote ? '"' : ''}${ip}/${prefix}${quote ? '"' : ''}`).join('\n');
 
+  // "a,b,c": bare addresses for tools that take a comma-separated list.
+  const formatIpList = (hosts) => hosts.join(',');
+
   if (typeof module !== 'undefined' && typeof document === 'undefined') {
     // Loaded by the unit tests in Node, not by Tampermonkey.
     module.exports = {
       parseMoney, parsePeriod, parseCost, parseDate, addMonths, renewalsNeeded, runway, analyze,
       formatMoney, formatMoneyMap, formatDate, plural, daysUntil,
-      extractIps, parseTrafficValue, subnetHosts, formatNetplan,
+      extractIps, parseTrafficValue, subnetHosts, formatNetplan, formatIpList,
     };
     return;
   }
@@ -1482,11 +1485,15 @@
       return subnet && { node, subnet };
     }
 
-    // Two list styles: plain (8 spaces) and the quoted Ubuntu one (6 spaces).
+    // Two netplan list styles (plain with 8 spaces, quoted Ubuntu with 6) and NetPulse: bare addresses
+    // separated by commas, no mask.
     const VARIANTS = [
       { label: 'netplan', options: { indent: 8, quote: false }, hint: 'пункты списка с отступом 8 пробелов' },
       { label: 'ubuntu', options: { indent: 6, quote: true }, hint: 'адреса в кавычках, отступ 6 пробелов' },
+      { label: 'NetPulse', list: true, hint: 'адреса через запятую, без маски' },
     ];
+
+    const variantText = (hosts, prefix, variant) => (variant.list ? formatIpList(hosts) : formatNetplan({ hosts, prefix }, variant.options));
 
     function makeButton(card, variant, count) {
       const button = el('button', 'hl-copy', variant.label);
@@ -1498,7 +1505,7 @@
         e.stopPropagation();
         const current = readSubnet(card); // read again: the card may have been reused for another subnet
         if (!current) return;
-        copyText(formatNetplan(current.subnet, variant.options)).then(
+        copyText(variantText(current.subnet.hosts, current.subnet.prefix, variant)).then(
           () => {
             showToast(`Скопировано ${current.subnet.hosts.length} IP (${variant.label})`);
             button.classList.add('hl-ok');
@@ -1732,17 +1739,13 @@
 
     const fip = { selected: new Set(), busy: false, status: '', progress: null, confirm: null, ui: null };
 
-    function fipLines(ips, options) {
-      return formatNetplan({ hosts: ips, prefix: 32 }, options);
-    }
-
     async function copyLines(ips, variant) {
       if (!ips.length) {
         showToast('Нет адресов для копирования');
         return;
       }
       try {
-        await copyText(fipLines(ips, variant.options));
+        await copyText(variantText(ips, 32, variant));
         showToast(`Скопировано ${ips.length} IP (${variant.label})`);
       } catch (err) {
         showToast('Не удалось скопировать');
@@ -1926,7 +1929,7 @@
             refreshFipBar();
           });
           row.prepend(check);
-          for (const variant of VARIANTS) {
+          for (const variant of VARIANTS.filter((v) => !v.list)) { // NetPulse only makes sense for several addresses
             const copy = el('button', 'hl-copy', variant.label);
             copy.type = 'button';
             copy.title = `Скопировать ${ip}: ${variant.hint}`;

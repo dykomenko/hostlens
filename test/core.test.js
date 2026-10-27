@@ -273,3 +273,10 @@ test('analyze exposes the runway', () => {
   const result = core.analyze(rows, { today: TODAY, months: 1, balance: BAL(500) });
   assert.deepEqual(result.runway.outage, date(2026, 11, 20));
 });
+
+test('formatIpList joins bare addresses with commas', () => {
+  const { hosts } = core.subnetHosts('203.0.113.8/29', '203.0.113.9');
+  assert.equal(core.formatIpList(hosts), '203.0.113.10,203.0.113.11,203.0.113.12,203.0.113.13,203.0.113.14');
+  assert.equal(core.formatIpList(['203.0.113.7']), '203.0.113.7');
+  assert.equal(core.formatIpList([]), '');
+});
