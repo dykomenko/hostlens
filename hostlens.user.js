@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HostLens: итоги, IP и трафик в кабинетах хостингов
 // @namespace    https://github.com/dykomenko/hostlens
-// @version      2.1.5
+// @version      2.2.0
 // @description  Дополняет кабинеты хостингов: суммарная стоимость, сколько доплатить, чтобы всё работало ещё месяц (BILLmanager: Senko, WAIcore, H2 Nexus; WHMCS: Avoro), в списке услуг Avoro ещё IP, трафик и срок оплаты, а у подсетей Cherry Servers кнопка копирования IP для netplan.
 // @author       dykomenko
 // @license      MIT
@@ -527,6 +527,28 @@
     }
     .hl-copy:hover { border-color: #9ca3af; background: #f3f4f6; }
     .hl-copy.hl-ok { border-color: rgba(22, 163, 74, .7); background: rgba(22, 163, 74, .12); color: #166534; }
+    .n-modal-container code.select-none { user-select: text !important; -webkit-user-select: text !important; cursor: copy; }
+    .hl-fip {
+      box-sizing: border-box; margin: 0; padding: 10px 14px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff;
+      font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; color: #111827;
+    }
+    .hl-fip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .hl-fip-count { min-width: 110px; color: #6b7280; }
+    .hl-fip-label { color: #6b7280; }
+    .hl-fip-sep { flex: 0 0 1px; align-self: stretch; background: #e5e7eb; margin: 0 4px; }
+    .hl-fip-qty { width: 52px; padding: 2px 6px; border: 1px solid #d1d5db; border-radius: 4px; font: inherit; }
+    .hl-fip-status { color: #6b7280; }
+    .hl-fip-btn {
+      padding: 2px 10px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; color: #374151;
+      font: 500 12px/22px system-ui, -apple-system, Segoe UI, sans-serif; cursor: pointer; white-space: nowrap;
+    }
+    .hl-fip-btn:hover:not(:disabled) { border-color: #9ca3af; background: #f3f4f6; }
+    .hl-fip-btn:disabled { opacity: .45; cursor: default; }
+    .hl-fip-danger { border-color: #fca5a5; color: #b91c1c; }
+    .hl-fip-danger:hover:not(:disabled) { border-color: #ef4444; background: #fef2f2; }
+    .hl-fip-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; border-radius: 4px; background: #fffbeb; border: 1px solid #fcd34d; }
+    .hl-month { margin-left: 6px; color: #6b7280; font-size: 11px; white-space: nowrap; }
+    .hl-fip-check { width: 16px; height: 16px; margin: 0 4px 0 0; cursor: pointer; accent-color: #2563eb; }
     .hl-toast {
       position: fixed; left: 50%; bottom: 24px; z-index: 2147483647; transform: translate(-50%, 8px);
       max-width: calc(100vw - 32px); padding: 8px 14px; border-radius: 8px; background: #111827; color: #fff;
@@ -559,7 +581,7 @@
 
   const insideOurs = (node) => {
     const element = node.nodeType === 1 ? node : node.parentElement;
-    return !!element && !!element.closest('.' + PANEL_CLASS + ', .hl-box, .hl-copy');
+    return !!element && !!element.closest('.' + PANEL_CLASS + ', .hl-box, .hl-copy, .hl-fip, .hl-fip-check, .hl-month');
   };
 
   // Calls `run` at most once per `delay` while the page keeps changing, ignoring our own DOM edits.
@@ -1453,6 +1475,9 @@
     }
 
     function scan() {
+      scanFloatingIps();
+      scanDialogs();
+      scanPrices();
       for (const card of document.querySelectorAll('a[href]')) {
         if (!SUBNET_LINK.test(card.getAttribute('href'))) continue;
         const found = readSubnet(card);
@@ -1469,6 +1494,420 @@
           anchor.after(button);
           anchor = button;
         }
+      }
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Floating IPs: select several cards and attach / detach / terminate them in one go,
+     * order N at once, copy addresses for netplan, and make the termination phrase usable.
+     * The portal's own buttons do the work (it reloads the whole list after every action), so
+     * the script only drives them: nothing here talks to the API or touches the session token.
+     * ------------------------------------------------------------------ */
+
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    async function waitFor(check, timeout = 5000) {
+      const started = Date.now();
+      for (;;) {
+        const value = check();
+        if (value) return value;
+        if (Date.now() - started > timeout) return null;
+        await sleep(60);
+      }
+    }
+
+    const FIP_ORDER = 'button[data-context="order_floating_ip"]';
+    const fipCards = () => [...document.querySelectorAll('[data-context="floating-ip"]')];
+    const fipAddress = (card) => textOf(card.querySelector('.text-black.font-semibold'));
+    const fipAttachButton = (card) => card.querySelector('[data-context="floating-ip_attachment"]'); // only while the IP is free
+    const fipCard = (ip) => fipCards().find((card) => fipAddress(card) === ip) || null;
+    const isFree = (ip) => {
+      const card = fipCard(ip);
+      return !!card && !!fipAttachButton(card);
+    };
+    const isAttached = (ip) => {
+      const card = fipCard(ip);
+      return !!card && !fipAttachButton(card);
+    };
+    const menuOption = (menu, label) => [...menu.querySelectorAll('.n-dropdown-option-body__label')].find((n) => textOf(n) === label) || null;
+    const modalWith = (title) => [...document.querySelectorAll('.n-modal-container')].find((m) => textOf(m).includes(title)) || null;
+    const buttonIn = (root, label) => [...root.querySelectorAll('button')].find((b) => textOf(b) === label) || null;
+
+    // Naive UI listens to the input event, so a plain `.value =` would not reach its state.
+    function setInputValue(input, value) {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // Attach clicks can be sent together; the portal handles the parallel requests.
+    async function attachAll(ips) {
+      let pending = ips.filter(isFree);
+      for (let round = 0; round < 3 && pending.length; round++) {
+        pending.forEach((ip) => fipAttachButton(fipCard(ip)).click());
+        await waitFor(() => !pending.some(isFree), 30000);
+        pending = pending.filter(isFree);
+      }
+      return { done: ips.length - pending.length, failed: pending };
+    }
+
+    // The portal sometimes leaves a closed card's menu in the DOM, so an option is only taken from a menu
+    // that did not exist before this click.
+    async function openActionMenu(ip, label) {
+      const card = fipCard(ip);
+      if (!card) return null;
+      const before = new Set(document.querySelectorAll('.n-dropdown-menu'));
+      card.querySelector('[data-context="floating-ip_actions"]').click();
+      const menu = await waitFor(() => [...document.querySelectorAll('.n-dropdown-menu')].find((m) => !before.has(m)), 3000);
+      return menu ? menuOption(menu, label) : null;
+    }
+
+    // The menu is per card and the list rebuilds after each action, so Detach goes one by one
+    // and the result is verified (with retries) at the end.
+    async function detachAll(ips, progress) {
+      let pending = ips.filter(isAttached);
+      for (let round = 0; round < 3 && pending.length; round++) {
+        let n = 0;
+        for (const ip of pending) {
+          progress(`Detach ${++n}/${pending.length}`);
+          const option = await openActionMenu(ip, 'Detach');
+          if (option) option.click();
+        }
+        await waitFor(() => !pending.some(isAttached), 20000);
+        pending = pending.filter(isAttached);
+      }
+      return { done: ips.length - pending.length, failed: pending };
+    }
+
+    async function terminateOne(ip) {
+      if (!isFree(ip)) return false; // never touch an address that is still attached
+      const option = await openActionMenu(ip, 'Terminate');
+      if (!option) return false;
+      option.click();
+      const modal = await waitFor(() => modalWith('IP address termination'), 5000);
+      if (!modal) return false;
+      const discard = () => {
+        const button = buttonIn(modal, 'Discard');
+        if (button) button.click();
+        return false;
+      };
+      if (!textOf(modal).includes(ip)) return discard(); // the dialog must be about this very address
+      const phrase = [...modal.querySelectorAll('code')].map(textOf).find((t) => /^[\w.-]+\/[\w.-]+$/.test(t));
+      const input = modal.querySelector('input');
+      if (!phrase || !input) return discard();
+      setInputValue(input, phrase);
+      await sleep(200);
+      const confirm = buttonIn(modal, 'Terminate');
+      if (!confirm || confirm.disabled) return discard();
+      confirm.click();
+      return !!(await waitFor(() => !modalWith('IP address termination'), 15000));
+    }
+
+    async function terminateAll(ips, progress) {
+      const failed = [];
+      let n = 0;
+      for (const ip of ips) {
+        progress(`Terminate ${++n}/${ips.length}`);
+        if (!(await terminateOne(ip))) failed.push(ip);
+        await sleep(300);
+      }
+      return { done: ips.length - failed.length, failed };
+    }
+
+    const HOURLY = /^([\d.,]+)\s*([A-Z]{3})\s*\/\s*hr$/i;
+    const HOURS_PER_MONTH = 720;
+
+    // The dialog loads its region and price a moment after it opens ("Select region" first).
+    const priceLeaf = (root) => [...root.querySelectorAll('div, span')].find((n) => !n.children.length && HOURLY.test(textOf(n))) || null;
+
+    function offerIn(modal) {
+      const leaf = priceLeaf(modal);
+      if (!leaf) return null;
+      const match = HOURLY.exec(textOf(leaf));
+      const first = leaf.parentElement && leaf.parentElement.firstElementChild;
+      // the region is several elements ("Stockholm, SE" and "SE-Stockholm"); textContent would glue them together
+      const parts = first && first !== leaf ? [...first.querySelectorAll('*')].filter((n) => !n.children.length).map(textOf).filter(Boolean) : [];
+      return {
+        price: parseFloat(match[1].replace(',', '.')),
+        currency: match[2].toUpperCase(),
+        region: parts.join(' '),
+      };
+    }
+
+    // Opens the order dialog only to read what it offers, then closes it.
+    async function readOrderOffer() {
+      document.querySelector(FIP_ORDER).click();
+      const modal = await waitFor(() => modalWith('Floating IP Order'), 5000);
+      if (!modal) return null;
+      const offer = await waitFor(() => offerIn(modal), 8000);
+      const discard = buttonIn(modal, 'Discard');
+      if (discard) discard.click();
+      await waitFor(() => !modalWith('Floating IP Order'), 5000);
+      return offer;
+    }
+
+    // Hourly prices are everywhere in the portal; show the monthly figure next to them.
+    function scanPrices() {
+      for (const node of document.querySelectorAll('div, span')) {
+        if (node.children.length || node.dataset.hlMonth || node.textContent.length > 30) continue;
+        const match = HOURLY.exec(textOf(node));
+        if (!match) continue;
+        node.dataset.hlMonth = '1';
+        const monthly = parseFloat(match[1].replace(',', '.')) * HOURS_PER_MONTH;
+        node.after(el('span', 'hl-month', `≈ ${monthly.toFixed(2)} ${match[2].toUpperCase()}/мес`));
+      }
+    }
+
+    async function orderMany(count, progress) {
+      let done = 0;
+      for (let i = 1; i <= count; i++) {
+        progress(`Заказ ${i}/${count}`);
+        document.querySelector(FIP_ORDER).click();
+        const modal = await waitFor(() => modalWith('Floating IP Order'), 5000);
+        if (!modal || !(await waitFor(() => offerIn(modal), 8000))) break; // wait until the region and price have loaded
+        const order = buttonIn(modal, 'Order');
+        if (!order || order.disabled) break;
+        order.click();
+        if (!(await waitFor(() => !modalWith('Floating IP Order'), 15000))) break; // the dialog stayed: an error, stop
+        done++;
+        await sleep(400);
+      }
+      return { done, failed: count - done };
+    }
+
+    const fip = { selected: new Set(), busy: false, status: '', confirm: null, ui: null };
+
+    function fipLines(ips, options) {
+      return formatNetplan({ hosts: ips, prefix: 32 }, options);
+    }
+
+    async function copyLines(ips, variant) {
+      if (!ips.length) {
+        showToast('Нет адресов для копирования');
+        return;
+      }
+      try {
+        await copyText(fipLines(ips, variant.options));
+        showToast(`Скопировано ${ips.length} IP (${variant.label})`);
+      } catch (err) {
+        showToast('Не удалось скопировать');
+      }
+    }
+
+    async function runBatch(title, job) {
+      if (fip.busy) return;
+      fip.busy = true;
+      fip.confirm = null;
+      const progress = (text) => {
+        fip.status = text;
+        refreshFipBar();
+      };
+      refreshFipBar();
+      try {
+        const result = await job(progress);
+        const failed = result.failed && result.failed.length ? `, не удалось: ${Array.isArray(result.failed) ? result.failed.join(', ') : result.failed}` : '';
+        fip.status = `${title}: готово ${result.done}${failed}`;
+        showToast(fip.status);
+      } catch (err) {
+        console.error('[hostlens]', err);
+        fip.status = `${title}: ошибка, ${err && err.message ? err.message : err}`;
+        showToast(fip.status);
+      } finally {
+        fip.busy = false;
+        refreshFipBar();
+      }
+    }
+
+    const selectedIps = () => [...fip.selected].filter((ip) => fipCard(ip));
+
+    function askConfirm(text, run) {
+      fip.confirm = { text, run };
+      refreshFipBar();
+    }
+
+    async function startOrder() {
+      const input = fip.ui.qty;
+      const count = Math.max(1, Math.min(20, parseInt(input.value, 10) || 1));
+      input.value = String(count);
+      fip.busy = true;
+      fip.status = 'Читаю цену в диалоге заказа…';
+      refreshFipBar();
+      let offer = null;
+      try {
+        offer = await readOrderOffer();
+      } finally {
+        fip.busy = false;
+        fip.status = '';
+      }
+      if (!offer) {
+        fip.status = 'Не удалось прочитать цену в диалоге заказа';
+        refreshFipBar();
+        return;
+      }
+      const hourly = offer.price * count;
+      askConfirm(
+        `Купить ${count} × floating IP${offer.region ? ` (${offer.region})` : ''}: ${offer.price} ${offer.currency}/ч каждый. ` +
+        `Итого ≈ ${hourly.toFixed(3)} ${offer.currency}/ч, ≈ ${(hourly * HOURS_PER_MONTH).toFixed(2)} ${offer.currency} в месяц.`,
+        () => runBatch('Заказ', (progress) => orderMany(count, progress)),
+      );
+    }
+
+    const VARIANT_BUTTONS = () => VARIANTS.map((variant) => {
+      const button = el('button', 'hl-fip-btn', variant.label);
+      button.type = 'button';
+      button.title = `Скопировать выбранные IP (или все на странице): ${variant.hint}`;
+      button.addEventListener('click', () => copyLines(selectedIps().length ? selectedIps() : fipCards().map(fipAddress), variant));
+      return button;
+    });
+
+    function buildFipBar() {
+      const button = (label, onclick, extra = '') => {
+        const node = el('button', 'hl-fip-btn' + extra, label);
+        node.type = 'button';
+        node.addEventListener('click', onclick);
+        return node;
+      };
+      const all = el('input');
+      all.type = 'checkbox';
+      all.title = 'Выбрать все на странице';
+      all.addEventListener('change', () => {
+        fipCards().forEach((card) => (all.checked ? fip.selected.add(fipAddress(card)) : fip.selected.delete(fipAddress(card))));
+        syncFipCards();
+        refreshFipBar();
+      });
+
+      const ui = {
+        all,
+        count: el('span', 'hl-fip-count'),
+        attach: button('Attach', () => runBatch('Attach', () => attachAll(selectedIps()))),
+        detach: button('Detach', () => runBatch('Detach', (progress) => detachAll(selectedIps(), progress))),
+        terminate: button('Terminate…', () => {
+          const ips = selectedIps().filter(isFree);
+          askConfirm(
+            `Безвозвратно удалить ${ips.length} IP: ${ips.join(', ')}. Биллинг по ним остановится, вернуть адреса нельзя. ` +
+            'Фраза подтверждения будет введена автоматически.',
+            () => runBatch('Terminate', (progress) => terminateAll(ips, progress)),
+          );
+        }, ' hl-fip-danger'),
+        qty: el('input', 'hl-fip-qty'),
+        order: button('Купить…', startOrder),
+        status: el('span', 'hl-fip-status'),
+        confirm: el('div', 'hl-fip-confirm'),
+      };
+      ui.qty.type = 'number';
+      ui.qty.min = '1';
+      ui.qty.max = '20';
+      ui.qty.value = '1';
+      ui.qty.title = 'Сколько IP заказать';
+
+      const bar = el('div', 'hl-fip');
+      const row = el('div', 'hl-fip-row');
+      row.append(all, ui.count, ui.attach, ui.detach, ...VARIANT_BUTTONS(), ui.terminate,
+        el('span', 'hl-fip-sep'), el('span', 'hl-fip-label', 'Заказать:'), ui.qty, ui.order, ui.status);
+      bar.append(row, ui.confirm);
+      fip.ui = ui;
+      return bar;
+    }
+
+    function refreshFipBar() {
+      const ui = fip.ui;
+      if (!ui) return;
+      const cards = fipCards();
+      const ips = selectedIps();
+      const free = ips.filter(isFree).length;
+      const attached = ips.filter(isAttached).length;
+      ui.count.textContent = ips.length ? `Выбрано: ${ips.length}` : 'Ничего не выбрано';
+      ui.all.checked = cards.length > 0 && cards.every((card) => fip.selected.has(fipAddress(card)));
+      ui.attach.textContent = `Attach (${free})`;
+      ui.detach.textContent = `Detach (${attached})`;
+      ui.terminate.textContent = `Terminate… (${free})`;
+      ui.attach.disabled = fip.busy || !free;
+      ui.detach.disabled = fip.busy || !attached;
+      ui.terminate.disabled = fip.busy || !free;
+      ui.order.disabled = fip.busy;
+      ui.qty.disabled = fip.busy;
+      ui.status.textContent = fip.status;
+
+      ui.confirm.replaceChildren();
+      ui.confirm.style.display = fip.confirm ? '' : 'none';
+      if (fip.confirm) {
+        const run = fip.confirm.run;
+        const yes = el('button', 'hl-fip-btn hl-fip-danger', 'Подтвердить');
+        yes.type = 'button';
+        yes.addEventListener('click', run);
+        const no = el('button', 'hl-fip-btn', 'Отмена');
+        no.type = 'button';
+        no.addEventListener('click', () => {
+          fip.confirm = null;
+          refreshFipBar();
+        });
+        ui.confirm.append(el('span', null, fip.confirm.text), yes, no);
+      }
+    }
+
+    // A checkbox and two copy buttons on every card.
+    function syncFipCards() {
+      for (const card of fipCards()) {
+        const ip = fipAddress(card);
+        const nameNode = card.querySelector('.text-black.font-semibold');
+        const row = nameNode && nameNode.parentElement && nameNode.parentElement.parentElement;
+        if (!row) continue;
+
+        let check = card.querySelector('.hl-fip-check');
+        if (!check) {
+          check = el('input', 'hl-fip-check');
+          check.type = 'checkbox';
+          check.addEventListener('change', () => {
+            const current = fipAddress(card);
+            if (check.checked) fip.selected.add(current);
+            else fip.selected.delete(current);
+            refreshFipBar();
+          });
+          row.prepend(check);
+          for (const variant of VARIANTS) {
+            const copy = el('button', 'hl-copy', variant.label);
+            copy.type = 'button';
+            copy.title = `Скопировать ${ip}: ${variant.hint}`;
+            copy.addEventListener('click', () => copyLines([fipAddress(card)], variant));
+            row.append(copy);
+          }
+        }
+        check.checked = fip.selected.has(ip);
+      }
+    }
+
+    function scanFloatingIps() {
+      const order = document.querySelector(FIP_ORDER);
+      const existing = document.querySelector('.hl-fip');
+      if (!order) {
+        if (existing) existing.remove();
+        fip.ui = null;
+        return;
+      }
+      if (!existing || !fip.ui) {
+        if (existing) existing.remove();
+        order.parentElement.after(buildFipBar());
+      }
+      for (const ip of [...fip.selected]) if (!fipCard(ip) && !fip.busy) fip.selected.delete(ip); // left this page or was removed
+      syncFipCards();
+      refreshFipBar();
+    }
+
+    // The termination dialog asks to type a phrase that the portal renders unselectable.
+    function scanDialogs() {
+      for (const code of document.querySelectorAll('.n-modal-container code')) {
+        if (code.dataset.hlPhrase || !/^[\w.-]+\/[\w.-]+$/.test(textOf(code))) continue;
+        code.dataset.hlPhrase = '1';
+        code.title = 'Клик — скопировать';
+        code.addEventListener('click', () => copyText(textOf(code)).then(() => showToast('Фраза скопирована'), () => {}));
+        const fill = el('button', 'hl-copy', 'вставить');
+        fill.type = 'button';
+        fill.title = 'Вписать фразу в поле подтверждения';
+        fill.addEventListener('click', (e) => {
+          e.preventDefault();
+          const input = code.closest('.n-modal-container').querySelector('input');
+          if (input) setInputValue(input, textOf(code));
+        });
+        code.after(fill);
       }
     }
 
