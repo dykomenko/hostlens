@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HostLens: итоги, IP и трафик в кабинетах хостингов
 // @namespace    https://github.com/dykomenko/hostlens
-// @version      2.2.0
+// @version      2.3.0
 // @description  Дополняет кабинеты хостингов: суммарная стоимость, сколько доплатить, чтобы всё работало ещё месяц (BILLmanager: Senko, WAIcore, H2 Nexus; WHMCS: Avoro), в списке услуг Avoro ещё IP, трафик и срок оплаты, а у подсетей Cherry Servers кнопка копирования IP для netplan.
 // @author       dykomenko
 // @license      MIT
@@ -10,12 +10,13 @@
 // @match        https://my.h2.nexus/billmgr*
 // @match        https://avoro.eu/cp/clientarea.php*
 // @match        https://portal.cherryservers.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @connect      avoro.eu
 // @homepageURL  https://github.com/dykomenko/hostlens
 // @supportURL   https://github.com/dykomenko/hostlens/issues
@@ -528,7 +529,9 @@
     .hl-copy:hover { border-color: #9ca3af; background: #f3f4f6; }
     .hl-copy.hl-ok { border-color: rgba(22, 163, 74, .7); background: rgba(22, 163, 74, .12); color: #166534; }
     .n-modal-container code.select-none { user-select: text !important; -webkit-user-select: text !important; cursor: copy; }
+    html.hl-hide-fip-meta .hl-fip-meta { display: none !important; }
     .hl-fip {
+      position: sticky; top: 56px; z-index: 20;
       box-sizing: border-box; margin: 0; padding: 10px 14px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff;
       font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; color: #111827;
     }
@@ -1432,6 +1435,37 @@
    * Adapter: Cherry Servers portal (Vue SPA): "copy for netplan" on every public IPv4 subnet
    * ------------------------------------------------------------------ */
 
+  // The portal lists floating IPs ten per page (GET /v1/servers/<id>/ips?limit=10&offset=0) and the Vue list
+  // simply renders whatever comes back. So the first page's request is changed to ask for 100; the pager is
+  // hidden when that covers the whole list. Only the page size of the portal's own request changes.
+  const FIP_PAGE_LIMIT = 100;
+  const listing = { total: null };
+
+  function patchFloatingListing() {
+    const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const proto = page.XMLHttpRequest && page.XMLHttpRequest.prototype;
+    if (!proto || proto.__hlPatched) return;
+    const open = proto.open;
+    proto.open = function (method, url, ...rest) {
+      try {
+        const u = new URL(url, location.href);
+        if (/\/v1\/servers\/\d+\/ips$/.test(u.pathname)) {
+          listing.total = null;
+          if (u.searchParams.get('limit') === '10' && u.searchParams.get('offset') === '0') {
+            u.searchParams.set('limit', String(FIP_PAGE_LIMIT));
+            url = u.toString();
+            this.addEventListener('load', () => {
+              const total = Number(this.getResponseHeader('x-total-count'));
+              listing.total = Number.isFinite(total) ? total : null;
+            });
+          }
+        }
+      } catch (e) { /* never break the portal's own request */ }
+      return open.call(this, method, url, ...rest);
+    };
+    proto.__hlPatched = true;
+  }
+
   function runCherry() {
     const SUBNET_LINK = /\/network\/subnets\/\d+/;
     const CIDR = /^(?:\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
@@ -1540,11 +1574,18 @@
     }
 
     // Attach clicks can be sent together; the portal handles the parallel requests.
-    async function attachAll(ips) {
+    // In batches, so a long list does not fire dozens of requests at once.
+    const ATTACH_BATCH = 8;
+
+    async function attachAll(ips, progress) {
       let pending = ips.filter(isFree);
       for (let round = 0; round < 3 && pending.length; round++) {
-        pending.forEach((ip) => fipAttachButton(fipCard(ip)).click());
-        await waitFor(() => !pending.some(isFree), 30000);
+        for (let i = 0; i < pending.length; i += ATTACH_BATCH) {
+          const batch = pending.slice(i, i + ATTACH_BATCH).filter(isFree);
+          progress(`Attach ${Math.min(i + ATTACH_BATCH, pending.length)}/${pending.length}`);
+          batch.forEach((ip) => fipAttachButton(fipCard(ip)).click());
+          await waitFor(() => !batch.some(isFree), 30000);
+        }
         pending = pending.filter(isFree);
       }
       return { done: ips.length - pending.length, failed: pending };
@@ -1778,7 +1819,7 @@
       const ui = {
         all,
         count: el('span', 'hl-fip-count'),
-        attach: button('Attach', () => runBatch('Attach', () => attachAll(selectedIps()))),
+        attach: button('Attach', () => runBatch('Attach', (progress) => attachAll(selectedIps(), progress))),
         detach: button('Detach', () => runBatch('Detach', (progress) => detachAll(selectedIps(), progress))),
         terminate: button('Terminate…', () => {
           const ips = selectedIps().filter(isFree);
@@ -1872,7 +1913,25 @@
           }
         }
         check.checked = fip.selected.has(ip);
+
+        // PTR, DNS, DDoS Scrubbing and Tags rarely change; the rows are only marked here and hidden by a class on <html>.
+        for (const line of card.querySelectorAll('.divide-y > div')) {
+          if (!line.classList.contains('hl-fip-meta') && FIP_META_LABELS.test(textOf(line.firstElementChild))) line.classList.add('hl-fip-meta');
+        }
       }
+    }
+
+    const FIP_META_LABELS = /^(PTR|DNS|DDoS Scrubbing|Tags)$/i;
+
+    function applyFipMeta() {
+      document.documentElement.classList.toggle('hl-hide-fip-meta', store.get('cherryHideFipMeta', true));
+    }
+
+    // With everything on one page the pager only gets in the way.
+    function applyPagerVisibility() {
+      const first = [...document.querySelectorAll('button')].find((b) => textOf(b) === 'First');
+      const pager = first && first.closest('.grid.justify-center');
+      if (pager) pager.style.display = listing.total !== null && listing.total <= FIP_PAGE_LIMIT ? 'none' : '';
     }
 
     function scanFloatingIps() {
@@ -1889,6 +1948,7 @@
       }
       for (const ip of [...fip.selected]) if (!fipCard(ip) && !fip.busy) fip.selected.delete(ip); // left this page or was removed
       syncFipCards();
+      applyPagerVisibility();
       refreshFipBar();
     }
 
@@ -1963,13 +2023,26 @@
         store.set('cherryBackground', !store.get('cherryBackground', true));
         applyBackground();
       });
+      GM_registerMenuCommand('Floating IP: показать/скрыть PTR, DNS, DDoS, Tags', () => {
+        store.set('cherryHideFipMeta', !store.get('cherryHideFipMeta', true));
+        applyFipMeta();
+      });
     }
+    applyFipMeta();
     watchPage(scan, 200);
   }
 
   /* ------------------------------------------------------------------ */
 
-  if (location.hostname === 'avoro.eu') runAvoro();
-  else if (location.hostname === 'portal.cherryservers.com') runCherry();
-  else runBillmanager();
+  const start = () => {
+    if (location.hostname === 'avoro.eu') runAvoro();
+    else if (location.hostname === 'portal.cherryservers.com') runCherry();
+    else runBillmanager();
+  };
+
+  // document-start lets the Cherry listing patch be in place before the portal's first request;
+  // everything else needs the page's DOM.
+  if (location.hostname === 'portal.cherryservers.com') patchFloatingListing();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
 })();
