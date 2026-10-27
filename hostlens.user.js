@@ -1591,7 +1591,9 @@
           const button = card && fipAttachButton(card);
           if (!button) continue;
           button.click();
-          if (await waitFor(() => isAttached(ip), 30000)) done++;
+          // Once attached, the portal's list for this server often stops returning the address, so a card that
+          // disappears counts as done just like one that switches to "attached".
+          if (await waitFor(() => !isFree(ip), 30000)) done++;
           await sleep(PAUSE_BETWEEN);
         }
         pending = pending.filter(isFree);
