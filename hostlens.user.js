@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HostLens: итоги, IP и трафик в кабинетах хостингов
 // @namespace    https://github.com/dykomenko/hostlens
-// @version      2.3.0
+// @version      2.4.0
 // @description  Дополняет кабинеты хостингов: суммарная стоимость, сколько доплатить, чтобы всё работало ещё месяц (BILLmanager: Senko, WAIcore, H2 Nexus; WHMCS: Avoro), в списке услуг Avoro ещё IP, трафик и срок оплаты, а у подсетей Cherry Servers кнопка копирования IP для netplan.
 // @author       dykomenko
 // @license      MIT
@@ -549,6 +549,8 @@
     .hl-fip-btn:disabled { opacity: .45; cursor: default; }
     .hl-fip-danger { border-color: #fca5a5; color: #b91c1c; }
     .hl-fip-danger:hover:not(:disabled) { border-color: #ef4444; background: #fef2f2; }
+    .hl-fip-progress { height: 4px; margin-top: 8px; border-radius: 2px; background: #e5e7eb; overflow: hidden; }
+    .hl-fip-progress > i { display: block; height: 100%; width: 0; background: #2563eb; transition: width .3s; }
     .hl-fip-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; border-radius: 4px; background: #fffbeb; border: 1px solid #fcd34d; }
     .hl-month { margin-left: 6px; color: #6b7280; font-size: 11px; white-space: nowrap; }
     .hl-fip-check { width: 16px; height: 16px; margin: 0 4px 0 0; cursor: pointer; accent-color: #2563eb; }
@@ -1573,22 +1575,29 @@
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
-    // Attach clicks can be sent together; the portal handles the parallel requests.
-    // In batches, so a long list does not fire dozens of requests at once.
-    const ATTACH_BATCH = 8;
+    // One address at a time: click, wait until the portal shows that very address as done, then the next.
+    // It is slower than sending everything at once but every step is checked and visible in the progress bar.
+    // `progress(text, done, total)` feeds the status line and the bar. Failures get one more pass at the end.
+    const PAUSE_BETWEEN = 800;
 
     async function attachAll(ips, progress) {
       let pending = ips.filter(isFree);
-      for (let round = 0; round < 3 && pending.length; round++) {
-        for (let i = 0; i < pending.length; i += ATTACH_BATCH) {
-          const batch = pending.slice(i, i + ATTACH_BATCH).filter(isFree);
-          progress(`Attach ${Math.min(i + ATTACH_BATCH, pending.length)}/${pending.length}`);
-          batch.forEach((ip) => fipAttachButton(fipCard(ip)).click());
-          await waitFor(() => !batch.some(isFree), 30000);
+      const total = pending.length;
+      let done = 0;
+      for (let round = 0; round < 2 && pending.length; round++) {
+        for (const ip of pending) {
+          progress(`Attach ${done + 1}/${total}: ${ip}`, done, total);
+          const card = fipCard(ip);
+          const button = card && fipAttachButton(card);
+          if (!button) continue;
+          button.click();
+          if (await waitFor(() => isAttached(ip), 30000)) done++;
+          await sleep(PAUSE_BETWEEN);
         }
         pending = pending.filter(isFree);
       }
-      return { done: ips.length - pending.length, failed: pending };
+      progress(`Attach ${done}/${total}`, done, total);
+      return { done, total, failed: pending };
     }
 
     // The portal sometimes leaves a closed card's menu in the DOM, so an option is only taken from a menu
@@ -1602,21 +1611,24 @@
       return menu ? menuOption(menu, label) : null;
     }
 
-    // The menu is per card and the list rebuilds after each action, so Detach goes one by one
-    // and the result is verified (with retries) at the end.
+    // Same approach as attach: one at a time, each result checked before moving on.
     async function detachAll(ips, progress) {
       let pending = ips.filter(isAttached);
-      for (let round = 0; round < 3 && pending.length; round++) {
-        let n = 0;
+      const total = pending.length;
+      let done = 0;
+      for (let round = 0; round < 2 && pending.length; round++) {
         for (const ip of pending) {
-          progress(`Detach ${++n}/${pending.length}`);
+          progress(`Detach ${done + 1}/${total}: ${ip}`, done, total);
           const option = await openActionMenu(ip, 'Detach');
-          if (option) option.click();
+          if (!option) continue;
+          option.click();
+          if (await waitFor(() => isFree(ip), 30000)) done++;
+          await sleep(PAUSE_BETWEEN);
         }
-        await waitFor(() => !pending.some(isAttached), 20000);
         pending = pending.filter(isAttached);
       }
-      return { done: ips.length - pending.length, failed: pending };
+      progress(`Detach ${done}/${total}`, done, total);
+      return { done, total, failed: pending };
     }
 
     async function terminateOne(ip) {
@@ -1647,11 +1659,12 @@
       const failed = [];
       let n = 0;
       for (const ip of ips) {
-        progress(`Terminate ${++n}/${ips.length}`);
+        progress(`Terminate ${++n}/${ips.length}: ${ip}`, n - 1, ips.length);
         if (!(await terminateOne(ip))) failed.push(ip);
-        await sleep(300);
+        await sleep(PAUSE_BETWEEN);
       }
-      return { done: ips.length - failed.length, failed };
+      progress(`Terminate ${n - failed.length}/${ips.length}`, n - failed.length, ips.length);
+      return { done: ips.length - failed.length, total: ips.length, failed };
     }
 
     const HOURLY = /^([\d.,]+)\s*([A-Z]{3})\s*\/\s*hr$/i;
@@ -1701,7 +1714,7 @@
     async function orderMany(count, progress) {
       let done = 0;
       for (let i = 1; i <= count; i++) {
-        progress(`Заказ ${i}/${count}`);
+        progress(`Заказ ${i}/${count}`, done, count);
         document.querySelector(FIP_ORDER).click();
         const modal = await waitFor(() => modalWith('Floating IP Order'), 5000);
         if (!modal || !(await waitFor(() => offerIn(modal), 8000))) break; // wait until the region and price have loaded
@@ -1712,10 +1725,10 @@
         done++;
         await sleep(400);
       }
-      return { done, failed: count - done };
+      return { done, total: count, failed: count - done };
     }
 
-    const fip = { selected: new Set(), busy: false, status: '', confirm: null, ui: null };
+    const fip = { selected: new Set(), busy: false, status: '', progress: null, confirm: null, ui: null };
 
     function fipLines(ips, options) {
       return formatNetplan({ hosts: ips, prefix: 32 }, options);
@@ -1738,15 +1751,17 @@
       if (fip.busy) return;
       fip.busy = true;
       fip.confirm = null;
-      const progress = (text) => {
+      const progress = (text, done, total) => {
         fip.status = text;
+        fip.progress = total ? { done, total } : null;
         refreshFipBar();
       };
       refreshFipBar();
       try {
         const result = await job(progress);
         const failed = result.failed && result.failed.length ? `, не удалось: ${Array.isArray(result.failed) ? result.failed.join(', ') : result.failed}` : '';
-        fip.status = `${title}: готово ${result.done}${failed}`;
+        const of = result.total != null ? ` из ${result.total}` : '';
+        fip.status = `${title}: готово ${result.done}${of}${failed}`;
         showToast(fip.status);
       } catch (err) {
         console.error('[hostlens]', err);
@@ -1754,6 +1769,7 @@
         showToast(fip.status);
       } finally {
         fip.busy = false;
+        fip.progress = null;
         refreshFipBar();
       }
     }
@@ -1832,6 +1848,7 @@
         qty: el('input', 'hl-fip-qty'),
         order: button('Купить…', startOrder),
         status: el('span', 'hl-fip-status'),
+        bar: el('div', 'hl-fip-progress'),
         confirm: el('div', 'hl-fip-confirm'),
       };
       ui.qty.type = 'number';
@@ -1844,7 +1861,8 @@
       const row = el('div', 'hl-fip-row');
       row.append(all, ui.count, ui.attach, ui.detach, ...VARIANT_BUTTONS(), ui.terminate,
         el('span', 'hl-fip-sep'), el('span', 'hl-fip-label', 'Заказать:'), ui.qty, ui.order, ui.status);
-      bar.append(row, ui.confirm);
+      ui.bar.append(el('i'));
+      bar.append(row, ui.bar, ui.confirm);
       fip.ui = ui;
       return bar;
     }
@@ -1867,6 +1885,8 @@
       ui.order.disabled = fip.busy;
       ui.qty.disabled = fip.busy;
       ui.status.textContent = fip.status;
+      ui.bar.style.display = fip.busy && fip.progress ? '' : 'none';
+      if (fip.progress) ui.bar.firstChild.style.width = `${Math.round((100 * fip.progress.done) / fip.progress.total)}%`;
 
       ui.confirm.replaceChildren();
       ui.confirm.style.display = fip.confirm ? '' : 'none';
