@@ -280,3 +280,21 @@ test('formatIpList joins bare addresses with commas', () => {
   assert.equal(core.formatIpList(['203.0.113.7']), '203.0.113.7');
   assert.equal(core.formatIpList([]), '');
 });
+
+test('widenIpsUrl widens only the first-page floating IP list requests', () => {
+  const base = 'https://portal.example.test/';
+  const widen = (path) => core.widenIpsUrl(path, base, 100);
+  assert.equal(new URL(widen('/v1/servers/1/ips?limit=10&offset=0')).searchParams.get('limit'), '100');
+  const project = new URL(widen('/v1/projects/2/ips?type[]=floating-ip&limit=9&offset=0'));
+  assert.equal(project.searchParams.get('limit'), '100');
+  assert.deepEqual(project.searchParams.getAll('type[]'), ['floating-ip']);
+  assert.equal(widen('/v1/projects/2/ips?type[]=subnet&limit=9&offset=0'), null);
+  assert.equal(widen('/v1/projects/2/ips?type[]=floating-ip&limit=9&offset=9'), null);
+  assert.equal(widen('/v1/projects/2/ips?type[]=floating-ip&limit=10&offset=0'), null);
+  assert.equal(widen('/v1/servers/1/ips?limit=10&offset=10'), null);
+  assert.equal(widen('/v1/other/1/ips?limit=10&offset=0'), null);
+});
+
+test('uniqueNames drops empty names and repeats', () => {
+  assert.deepEqual(core.uniqueNames(['b', '', 'a', 'b', null, 'a']), ['b', 'a']);
+});

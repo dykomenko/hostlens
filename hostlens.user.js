@@ -415,12 +415,28 @@
   // "a,b,c": bare addresses for tools that take a comma-separated list.
   const formatIpList = (hosts) => hosts.join(',');
 
+  // The portal's first-page list request, rewritten to ask for `limit` items: /v1/servers/<id>/ips (limit=10) or
+  // /v1/projects/<id>/ips (limit=9, and only for floating IPs: the Subnets tab uses the same endpoint).
+  // Returns the new URL, or null when the request is not one to change.
+  function widenIpsUrl(url, base, limit) {
+    const u = new URL(url, base);
+    if (u.searchParams.get('offset') !== '0') return null;
+    const want = /\/v1\/servers\/\d+\/ips$/.test(u.pathname) ? '10'
+      : /\/v1\/projects\/\d+\/ips$/.test(u.pathname) && u.searchParams.getAll('type[]').includes('floating-ip') ? '9' : null;
+    if (!want || u.searchParams.get('limit') !== want) return null;
+    u.searchParams.set('limit', String(limit));
+    return u.toString();
+  }
+
+  // Drop empty names and repeats, keep the order of first appearance.
+  const uniqueNames = (names) => [...new Set(names.filter(Boolean))];
+
   if (typeof module !== 'undefined' && typeof document === 'undefined') {
     // Loaded by the unit tests in Node, not by Tampermonkey.
     module.exports = {
       parseMoney, parsePeriod, parseCost, parseDate, addMonths, renewalsNeeded, runway, analyze,
       formatMoney, formatMoneyMap, formatDate, plural, daysUntil,
-      extractIps, parseTrafficValue, subnetHosts, formatNetplan, formatIpList,
+      extractIps, parseTrafficValue, subnetHosts, formatNetplan, formatIpList, widenIpsUrl, uniqueNames,
     };
     return;
   }
@@ -1440,7 +1456,7 @@
    * Adapter: Cherry Servers portal (Vue SPA): "copy for netplan" on every public IPv4 subnet
    * ------------------------------------------------------------------ */
 
-  // The portal lists floating IPs ten per page (GET /v1/servers/<id>/ips?limit=10&offset=0) and the Vue list
+  // The portal lists floating IPs ten per page (GET /v1/servers/<id>/ips?limit=10&offset=0; the project page: nine) and the Vue list
   // simply renders whatever comes back. So the first page's request is changed to ask for 100; the pager is
   // hidden when that covers the whole list. Only the page size of the portal's own request changes.
   const FIP_PAGE_LIMIT = 100;
@@ -1454,11 +1470,11 @@
     proto.open = function (method, url, ...rest) {
       try {
         const u = new URL(url, location.href);
-        if (/\/v1\/servers\/\d+\/ips$/.test(u.pathname)) {
+        if (/\/v1\/(servers|projects)\/\d+\/ips$/.test(u.pathname)) {
           listing.total = null;
-          if (u.searchParams.get('limit') === '10' && u.searchParams.get('offset') === '0') {
-            u.searchParams.set('limit', String(FIP_PAGE_LIMIT));
-            url = u.toString();
+          const wide = widenIpsUrl(url, location.href, FIP_PAGE_LIMIT);
+          if (wide) {
+            url = wide;
             this.addEventListener('load', () => {
               const total = Number(this.getResponseHeader('x-total-count'));
               listing.total = Number.isFinite(total) ? total : null;
@@ -1560,9 +1576,24 @@
     }
 
     const FIP_ORDER = 'button[data-context="order_floating_ip"]';
+    // The project-wide page has no floating-IP order button, only the general "order IP" one. There the panel is
+    // read-only: select and copy, no Attach/Detach/Terminate/Buy.
+    const FIP_PROJECT = '[data-context="view_project_floating_ips"]';
+    const FIP_PROJECT_ORDER = 'button[data-context="order_ip"]';
+    const FREE_TARGET = '::free';
+    const isLite = () => !!document.querySelector(FIP_PROJECT);
     const fipCards = () => [...document.querySelectorAll('[data-context="floating-ip"]')];
     const fipAddress = (card) => textOf(card.querySelector('.text-black.font-semibold'));
     const fipAttachButton = (card) => card.querySelector('[data-context="floating-ip_attachment"]'); // only while the IP is free
+    // The Target row is the first line of the card's list; its right-hand side holds the server name, or an
+    // Attach button while the address is free.
+    function fipTarget(card) {
+      if (fipAttachButton(card)) return FREE_TARGET;
+      const line = card.querySelector('.divide-y > div');
+      const leaves = line ? [...line.querySelectorAll('*')].filter((n) => !n.children.length && !n.closest('button') && textOf(n)) : [];
+      const name = leaves.length > 1 ? textOf(leaves[1]) : '';
+      return name && !/^attach$/i.test(name) ? name : '';
+    }
     const fipCard = (ip) => fipCards().find((card) => fipAddress(card) === ip) || null;
     const isFree = (ip) => {
       const card = fipCard(ip);
@@ -1837,8 +1868,23 @@
         refreshFipBar();
       });
 
+      const target = el('select', 'hl-fip-qty');
+      target.style.width = 'auto';
+      target.title = 'Отметить адреса по цели';
+      target.addEventListener('change', () => {
+        const value = target.value;
+        target.value = '';
+        if (!value) return;
+        for (const card of fipCards()) {
+          if (fipTarget(card) === value) fip.selected.add(fipAddress(card));
+        }
+        syncFipCards();
+        refreshFipBar();
+      });
+
       const ui = {
         all,
+        target,
         count: el('span', 'hl-fip-count'),
         attach: button('Attach', () => runBatch('Attach', (progress) => attachAll(selectedIps(), progress))),
         detach: button('Detach', () => runBatch('Detach', (progress) => detachAll(selectedIps(), progress))),
@@ -1864,12 +1910,22 @@
 
       const bar = el('div', 'hl-fip');
       const row = el('div', 'hl-fip-row');
-      row.append(all, ui.count, ui.attach, ui.detach, ...VARIANT_BUTTONS(), ui.terminate,
-        el('span', 'hl-fip-sep'), el('span', 'hl-fip-label', 'Заказать:'), ui.qty, ui.order, ui.status);
+      ui.actions = [ui.attach, ui.detach, ui.terminate, ui.sep = el('span', 'hl-fip-sep'), ui.orderLabel = el('span', 'hl-fip-label', 'Заказать:'), ui.qty, ui.order];
+      row.append(all, ui.count, target, ui.attach, ui.detach, ...VARIANT_BUTTONS(), ui.terminate,
+        ui.sep, ui.orderLabel, ui.qty, ui.order, ui.status);
       ui.bar.append(el('i'));
       bar.append(row, ui.bar, ui.confirm);
       fip.ui = ui;
       return bar;
+    }
+
+    // "Select by target": the free addresses plus one entry per server name found on the cards.
+    function fillTargets(select) {
+      const names = uniqueNames(fipCards().map(fipTarget).filter((t) => t !== FREE_TARGET)).sort();
+      const signature = names.join('|');
+      if (select.dataset.hlNames === signature && select.options.length) return;
+      select.dataset.hlNames = signature;
+      select.replaceChildren(new Option('Выбрать по цели…', ''), new Option('Свободные', FREE_TARGET), ...names.map((n) => new Option(n, n)));
     }
 
     function refreshFipBar() {
@@ -1879,6 +1935,9 @@
       const ips = selectedIps();
       const free = ips.filter(isFree).length;
       const attached = ips.filter(isAttached).length;
+      const lite = isLite();
+      for (const node of ui.actions) node.style.display = lite ? 'none' : '';
+      fillTargets(ui.target);
       ui.count.textContent = ips.length ? `Выбрано: ${ips.length}` : 'Ничего не выбрано';
       ui.all.checked = cards.length > 0 && cards.every((card) => fip.selected.has(fipAddress(card)));
       ui.attach.textContent = `Attach (${free})`;
@@ -1960,7 +2019,12 @@
     }
 
     function scanFloatingIps() {
-      const order = document.querySelector(FIP_ORDER);
+      const lite = isLite();
+      let order = document.querySelector(FIP_ORDER);
+      if (lite) {
+        const general = document.querySelector(FIP_PROJECT_ORDER);
+        order = general && general.closest('div.flex.items-center.justify-between');
+      }
       const existing = document.querySelector('.hl-fip');
       if (!order) {
         if (existing) existing.remove();
@@ -1969,7 +2033,7 @@
       }
       if (!existing || !fip.ui) {
         if (existing) existing.remove();
-        order.parentElement.after(buildFipBar());
+        (lite ? order : order.parentElement).after(buildFipBar());
       }
       for (const ip of [...fip.selected]) if (!fipCard(ip) && !fip.busy) fip.selected.delete(ip); // left this page or was removed
       syncFipCards();
