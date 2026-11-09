@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HostLens: итоги, IP и трафик в кабинетах хостингов
 // @namespace    https://github.com/dykomenko/hostlens
-// @version      2.4.3
+// @version      2.5.0
 // @description  Дополняет кабинеты хостингов: суммарная стоимость, сколько доплатить, чтобы всё работало ещё месяц (BILLmanager: Senko, WAIcore, H2 Nexus; WHMCS: Avoro), в списке услуг Avoro ещё IP, трафик и срок оплаты, а у подсетей Cherry Servers кнопка копирования IP для netplan.
 // @author       dykomenko
 // @license      MIT
@@ -431,12 +431,28 @@
   // Drop empty names and repeats, keep the order of first appearance.
   const uniqueNames = (names) => [...new Set(names.filter(Boolean))];
 
+  // The support page asks for ten tickets (GET /api/v2/clients/<id>/tickets?limit=10&offset=0) and has no pager.
+  // Returns the URL asking for `limit` instead, or null when the request is not the first ticket page.
+  function widenTicketsUrl(url, base, limit) {
+    const u = new URL(url, base);
+    if (!/\/api\/v2\/clients\/[^/]+\/tickets$/.test(u.pathname)) return null;
+    if (u.searchParams.get('offset') !== '0' || u.searchParams.get('limit') !== '10') return null;
+    u.searchParams.set('limit', String(limit));
+    return u.toString();
+  }
+
+  const isTicketsUrl = (url, base) => /\/api\/v2\/clients\/[^/]+\/tickets$/.test(new URL(url, base).pathname);
+
+  // Most recent activity first; the API returns them in no useful order.
+  const sortTicketsNewestFirst = (list) => list.slice().sort((a, b) => (Date.parse(b.updated) || 0) - (Date.parse(a.updated) || 0));
+
   if (typeof module !== 'undefined' && typeof document === 'undefined') {
     // Loaded by the unit tests in Node, not by Tampermonkey.
     module.exports = {
       parseMoney, parsePeriod, parseCost, parseDate, addMonths, renewalsNeeded, runway, analyze,
       formatMoney, formatMoneyMap, formatDate, plural, daysUntil,
       extractIps, parseTrafficValue, subnetHosts, formatNetplan, formatIpList, widenIpsUrl, uniqueNames,
+      widenTicketsUrl, isTicketsUrl, sortTicketsNewestFirst,
     };
     return;
   }
@@ -571,6 +587,20 @@
     .hl-fip-progress { height: 4px; margin-top: 8px; border-radius: 2px; background: #e5e7eb; overflow: hidden; }
     .hl-fip-progress > i { display: block; height: 100%; width: 0; background: #2563eb; transition: width .3s; }
     .hl-fip-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; border-radius: 4px; background: #fffbeb; border: 1px solid #fcd34d; }
+    .hl-sup {
+      box-sizing: border-box; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 12px;
+      border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; color: #111827;
+    }
+    .hl-sup-stats { color: #6b7280; margin-right: 8px; }
+    .hl-sup-show { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+    .hl-sup-select { padding: 2px 6px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; font: inherit; cursor: pointer; max-width: 260px; }
+    .hl-sup-btn {
+      margin-left: 10px; padding: 0 8px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; color: #374151;
+      font: 500 11px/20px system-ui, -apple-system, Segoe UI, sans-serif; cursor: pointer; white-space: nowrap; vertical-align: middle;
+    }
+    .hl-sup-btn:hover { border-color: #9ca3af; background: #f3f4f6; }
+    tr.hl-row-hidden { display: none !important; }
+    tr.hl-row-news > td:first-child { box-shadow: inset 3px 0 0 #f59e0b; }
     .hl-month { margin-left: 6px; color: #6b7280; font-size: 11px; white-space: nowrap; }
     .hl-fip-check { width: 16px; height: 16px; margin: 0 4px 0 0; cursor: pointer; accent-color: #2563eb; }
     .hl-toast {
@@ -605,7 +635,7 @@
 
   const insideOurs = (node) => {
     const element = node.nodeType === 1 ? node : node.parentElement;
-    return !!element && !!element.closest('.' + PANEL_CLASS + ', .hl-box, .hl-copy, .hl-fip, .hl-fip-check, .hl-month');
+    return !!element && !!element.closest('.' + PANEL_CLASS + ', .hl-box, .hl-copy, .hl-fip, .hl-fip-check, .hl-month, .hl-sup, .hl-sup-btn');
   };
 
   // Calls `run` at most once per `delay` while the page keeps changing, ignoring our own DOM edits.
@@ -1481,10 +1511,40 @@
             });
           }
         }
+        if (isTicketsUrl(url, location.href)) {
+          const wide = widenTicketsUrl(url, location.href, TICKET_PAGE_LIMIT);
+          if (wide) url = wide;
+          sortTicketResponse(this, proto);
+        }
       } catch (e) { /* never break the portal's own request */ }
       return open.call(this, method, url, ...rest);
     };
     proto.__hlPatched = true;
+  }
+
+  // Replaces what this request reports as its response with the same tickets, newest first, so the portal's own
+  // table renders them in that order. If anything about the payload is unexpected, the original is returned.
+  const TICKET_PAGE_LIMIT = 100;
+
+  function sortTicketResponse(xhr, proto) {
+    for (const prop of ['response', 'responseText']) {
+      const native = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!native || !native.get) continue;
+      Object.defineProperty(xhr, prop, {
+        configurable: true,
+        get() {
+          const raw = native.get.call(this);
+          try {
+            if (typeof raw === 'string') {
+              const list = JSON.parse(raw);
+              return Array.isArray(list) ? JSON.stringify(sortTicketsNewestFirst(list)) : raw;
+            }
+            if (Array.isArray(raw)) return sortTicketsNewestFirst(raw);
+          } catch (e) { /* not JSON, leave it */ }
+          return raw;
+        },
+      });
+    }
   }
 
   function runCherry() {
@@ -1535,6 +1595,11 @@
 
     function scan() {
       scanFloatingIps();
+      try {
+        scanSupport();
+      } catch (e) { // keep the other Cherry features working whatever happens on the support page
+        console.error('[hostlens] support', e);
+      }
       scanDialogs();
       scanPrices();
       for (const card of document.querySelectorAll('a[href]')) {
@@ -2057,6 +2122,160 @@
           if (input) setInputValue(input, textOf(code));
         });
         code.after(fill);
+      }
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Support tickets: all of them on one page, newest first, and an archive kept in this browser.
+     * ------------------------------------------------------------------ */
+
+    // archive: ticket id -> its "last activity" text at the moment it was archived. A ticket comes back by itself
+    // as soon as that text changes, so a new reply is never hidden.
+    const support = { archive: store.get('supportArchive', {}), showArchived: false, undo: null, ui: null, optionsKey: '' };
+
+    const onSupportList = () => /^\/support\/?$/.test(location.pathname);
+
+    function readTicketRows() {
+      const rows = [];
+      for (const tr of document.querySelectorAll('.n-data-table tbody tr')) {
+        const link = tr.querySelector('a[href^="/support/"]');
+        if (!link || tr.children.length < 4) continue;
+        rows.push({
+          tr,
+          id: link.getAttribute('href').split('/').filter(Boolean).pop(),
+          status: textOf(tr.children[1]),
+          updated: textOf(tr.children[2]),
+          department: textOf(tr.children[3]),
+        });
+      }
+      return rows;
+    }
+
+    const ticketArchived = (row) => support.archive[row.id] === row.updated;
+    const ticketHasNews = (row) => row.id in support.archive && support.archive[row.id] !== row.updated;
+
+    function changeArchive(change, message) {
+      support.undo = { ...support.archive };
+      change(support.archive);
+      store.set('supportArchive', support.archive);
+      if (message) showToast(message);
+      scanSupport();
+    }
+
+    // "Archive all ..." choices that make sense for what is on the page right now.
+    function bulkChoices(rows) {
+      const open = rows.filter((r) => !ticketArchived(r));
+      const choices = [{ value: 'all', label: `все показанные (${open.length})`, match: () => true }];
+      for (const status of uniqueNames(open.map((r) => r.status))) {
+        choices.push({ value: `status:${status}`, label: `статус «${status}» (${open.filter((r) => r.status === status).length})`, match: (r) => r.status === status });
+      }
+      for (const department of uniqueNames(open.map((r) => r.department))) {
+        choices.push({ value: `dept:${department}`, label: `отдел «${department}» (${open.filter((r) => r.department === department).length})`, match: (r) => r.department === department });
+      }
+      return choices;
+    }
+
+    function buildSupportBar() {
+      const ui = {
+        stats: el('span', 'hl-sup-stats'),
+        toggle: el('input'),
+        select: el('select', 'hl-sup-select'),
+        undo: el('button', 'hl-fip-btn', '↶ Отменить'),
+        restore: el('button', 'hl-fip-btn', 'Вернуть всё из архива'),
+      };
+      ui.toggle.type = 'checkbox';
+      ui.undo.type = 'button';
+      ui.restore.type = 'button';
+      ui.toggle.addEventListener('change', () => {
+        support.showArchived = ui.toggle.checked;
+        scanSupport();
+      });
+      ui.select.addEventListener('change', () => {
+        const choice = bulkChoices(readTicketRows()).find((c) => c.value === ui.select.value);
+        ui.select.value = '';
+        if (!choice) return;
+        const targets = readTicketRows().filter((r) => !ticketArchived(r) && choice.match(r));
+        if (targets.length) changeArchive((a) => targets.forEach((r) => (a[r.id] = r.updated)), `В архив: ${targets.length}`);
+      });
+      ui.undo.addEventListener('click', () => {
+        const previous = support.undo;
+        support.undo = null;
+        if (!previous) return;
+        support.archive = previous;
+        store.set('supportArchive', support.archive);
+        scanSupport();
+      });
+      ui.restore.addEventListener('click', () => changeArchive((a) => Object.keys(a).forEach((id) => delete a[id]), 'Архив очищен'));
+
+      const bar = el('div', 'hl-sup');
+      const showLabel = el('label', 'hl-sup-show');
+      showLabel.append(ui.toggle, ' Показать архив');
+      bar.append(ui.stats, showLabel, el('span', 'hl-fip-label', 'В архив:'), ui.select, ui.undo, ui.restore);
+      support.ui = ui;
+      return bar;
+    }
+
+    function scanSupport() {
+      const table = document.querySelector('.n-data-table');
+      let bar = document.querySelector('.hl-sup');
+      if (!onSupportList() || !table) {
+        if (bar) bar.remove();
+        support.ui = null;
+        return;
+      }
+      const rows = readTicketRows();
+      if (!rows.length) return;
+      if (!bar || !support.ui) {
+        if (bar) bar.remove();
+        bar = buildSupportBar();
+      }
+      if (bar.nextElementSibling !== table) table.before(bar);
+
+      let visible = 0;
+      let archived = 0;
+      for (const row of rows) {
+        const isArchived = ticketArchived(row);
+        if (isArchived) archived++;
+        const hidden = isArchived && !support.showArchived;
+        if (!hidden) visible++;
+        row.tr.classList.toggle('hl-row-hidden', hidden);
+        row.tr.classList.toggle('hl-row-news', ticketHasNews(row));
+        row.tr.title = ticketHasNews(row) ? 'Был в архиве, но в тикете появилась новая активность' : '';
+
+        let button = row.tr.querySelector('.hl-sup-btn');
+        if (!button) {
+          button = el('button', 'hl-sup-btn');
+          button.type = 'button';
+          button.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const current = readTicketRows().find((r) => r.tr === button.closest('tr'));
+            if (!current) return;
+            if (ticketArchived(current)) changeArchive((a) => delete a[current.id]);
+            else changeArchive((a) => (a[current.id] = current.updated));
+          });
+          row.tr.children[0].append(button);
+        }
+        button.textContent = isArchived ? 'вернуть' : 'в архив';
+      }
+
+      const ui = support.ui;
+      ui.stats.textContent = `Тикетов: ${rows.length} · показано: ${visible} · в архиве: ${archived}`;
+      ui.toggle.checked = support.showArchived;
+      ui.undo.style.display = support.undo ? '' : 'none';
+      ui.restore.style.display = Object.keys(support.archive).length ? '' : 'none';
+
+      const choices = bulkChoices(rows);
+      const key = choices.map((c) => c.value + c.label).join('|');
+      if (key !== support.optionsKey) { // rebuilt only when it changes, so an open dropdown is not closed under the user
+        support.optionsKey = key;
+        ui.select.replaceChildren(el('option', null, 'выбрать…'), ...choices.map((c) => {
+          const option = el('option', null, c.label);
+          option.value = c.value;
+          return option;
+        }));
+        ui.select.firstChild.value = '';
+        ui.select.value = '';
       }
     }
 

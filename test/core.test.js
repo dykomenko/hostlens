@@ -298,3 +298,27 @@ test('widenIpsUrl widens only the first-page floating IP list requests', () => {
 test('uniqueNames drops empty names and repeats', () => {
   assert.deepEqual(core.uniqueNames(['b', '', 'a', 'b', null, 'a']), ['b', 'a']);
 });
+
+test('widenTicketsUrl only touches the first page of the tickets request', () => {
+  const base = 'https://portal.example.test/support';
+  const url = 'https://api.example.test/api/v2/clients/abc/tickets?limit=10&offset=0&search=';
+  const wide = core.widenTicketsUrl(url, base, 100);
+  assert.equal(new URL(wide).searchParams.get('limit'), '100');
+  assert.equal(new URL(wide).searchParams.get('offset'), '0');
+  assert.equal(core.widenTicketsUrl('https://api.example.test/api/v2/clients/abc/tickets?limit=10&offset=10', base, 100), null);
+  assert.equal(core.widenTicketsUrl('https://api.example.test/api/v2/clients/abc/tickets?limit=25&offset=0', base, 100), null);
+  assert.equal(core.widenTicketsUrl('https://api.example.test/v1/servers/1/ips?limit=10&offset=0', base, 100), null);
+  assert.equal(core.isTicketsUrl(url, base), true);
+  assert.equal(core.isTicketsUrl('https://api.example.test/api/v2/clients/abc/other', base), false);
+});
+
+test('sortTicketsNewestFirst orders by last activity and does not touch the input', () => {
+  const input = [
+    { id: 'a', updated: '2026-10-13T17:22:00+00:00' },
+    { id: 'b', updated: '2026-11-09T13:53:00+00:00' },
+    { id: 'c', updated: '2026-10-27T21:16:00+00:00' },
+    { id: 'd', updated: 'not a date' },
+  ];
+  assert.deepEqual(core.sortTicketsNewestFirst(input).map((t) => t.id), ['b', 'c', 'a', 'd']);
+  assert.deepEqual(input.map((t) => t.id), ['a', 'b', 'c', 'd']);
+});
