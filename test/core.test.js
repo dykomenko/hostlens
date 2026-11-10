@@ -322,3 +322,30 @@ test('sortTicketsNewestFirst orders by last activity and does not touch the inpu
   assert.deepEqual(core.sortTicketsNewestFirst(input).map((t) => t.id), ['b', 'c', 'a', 'd']);
   assert.deepEqual(input.map((t) => t.id), ['a', 'b', 'c', 'd']);
 });
+
+test('serverFloatingRequest recognises only the first page of the server floating IP list', () => {
+  const base = 'https://portal.example.test/';
+  const q = (path) => core.serverFloatingRequest(path, base);
+  assert.equal(q('https://api.example.test/v1/servers/42/ips?type[]=floating-ip&limit=10&offset=0'), '42');
+  assert.equal(q('/v1/servers/42/ips?type[]=floating-ip&limit=10&offset=10'), null);
+  assert.equal(q('/v1/servers/42/ips?type[]=subnet&limit=10&offset=0'), null);
+  assert.equal(q('/v1/projects/7/ips?type[]=floating-ip&limit=9&offset=0'), null);
+});
+
+test('mergeServerFloating appends the project\'s floating IPs attached to the server that the server list lacks', () => {
+  const href = (id) => `https://api.example.test/v1/servers/${id}`;
+  const serverList = [{ id: 'a', type: 'floating-ip' }, { id: 'b', type: 'floating-ip' }];
+  const project = [
+    { id: 'a', type: 'floating-ip', targeted_to: { href: href(42) } },
+    { id: 'c', type: 'floating-ip', targeted_to: { href: href(42) } },
+    { id: 'd', type: 'floating-ip', targeted_to: { href: href(420) } },
+    { id: 'e', type: 'floating-ip', targeted_to: { href: href(9) } },
+    { id: 'f', type: 'floating-ip' },
+    { id: 'g', type: 'subnet', targeted_to: { href: href(42) } },
+  ];
+  assert.deepEqual(core.mergeServerFloating(serverList, project, '42').map((x) => x.id), ['a', 'b', 'c']);
+  assert.equal(serverList.length, 2);
+  assert.equal(core.mergeServerFloating(serverList, [], '42'), serverList);
+  assert.equal(core.mergeServerFloating(serverList, null, '42'), serverList);
+  assert.equal(core.mergeServerFloating({ not: 'a list' }, project, '42').not, 'a list');
+});

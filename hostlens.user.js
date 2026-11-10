@@ -446,13 +446,34 @@
   // Most recent activity first; the API returns them in no useful order.
   const sortTicketsNewestFirst = (list) => list.slice().sort((a, b) => (Date.parse(b.updated) || 0) - (Date.parse(a.updated) || 0));
 
+  // The server page's floating IP list (GET /v1/servers/<id>/ips?type[]=floating-ip) can leave out addresses that are
+  // attached to that very server: the project's own list has them. Returns the server id when `url` is that
+  // request's first page, or null.
+  function serverFloatingRequest(url, base) {
+    const u = new URL(url, base);
+    const m = /\/v1\/servers\/(\d+)\/ips$/.exec(u.pathname);
+    if (!m || u.searchParams.get('offset') !== '0') return null;
+    return u.searchParams.getAll('type[]').includes('floating-ip') ? m[1] : null;
+  }
+
+  // The project list's floating IPs that are attached to server `serverId` and missing from `serverList`, appended
+  // to it. Anything unexpected returns `serverList` unchanged.
+  function mergeServerFloating(serverList, projectList, serverId) {
+    if (!Array.isArray(serverList) || !Array.isArray(projectList)) return serverList;
+    const have = new Set(serverList.map((ip) => ip && ip.id));
+    const onServer = new RegExp(`/servers/${serverId}(?:[/?]|$)`);
+    const extra = projectList.filter((ip) => ip && ip.type === 'floating-ip' && !have.has(ip.id)
+      && ip.targeted_to && onServer.test(String(ip.targeted_to.href || '')));
+    return extra.length ? serverList.concat(extra) : serverList;
+  }
+
   if (typeof module !== 'undefined' && typeof document === 'undefined') {
     // Loaded by the unit tests in Node, not by Tampermonkey.
     module.exports = {
       parseMoney, parsePeriod, parseCost, parseDate, addMonths, renewalsNeeded, runway, analyze,
       formatMoney, formatMoneyMap, formatDate, plural, daysUntil,
       extractIps, parseTrafficValue, subnetHosts, formatNetplan, formatIpList, widenIpsUrl, uniqueNames,
-      widenTicketsUrl, isTicketsUrl, sortTicketsNewestFirst,
+      widenTicketsUrl, isTicketsUrl, sortTicketsNewestFirst, serverFloatingRequest, mergeServerFloating,
     };
     return;
   }
@@ -1502,6 +1523,8 @@
         const u = new URL(url, location.href);
         if (/\/v1\/(servers|projects)\/\d+\/ips$/.test(u.pathname)) {
           listing.total = null;
+          const serverId = serverFloatingRequest(url, location.href);
+          if (serverId) mergeProjectFloating(this, proto, { serverId, origin: u.origin });
           const wide = widenIpsUrl(url, location.href, FIP_PAGE_LIMIT);
           if (wide) {
             url = wide;
@@ -1519,7 +1542,94 @@
       } catch (e) { /* never break the portal's own request */ }
       return open.call(this, method, url, ...rest);
     };
+    // Held-back requests: see mergeProjectFloating.
+    const send = proto.send;
+    const setHeader = proto.setRequestHeader;
+    proto.setRequestHeader = function (name, value) {
+      if (this.__hlMerge && /^authorization$/i.test(name)) this.__hlMerge.auth = value;
+      return setHeader.apply(this, arguments);
+    };
+    proto.send = function (...args) {
+      const job = this.__hlMerge;
+      if (!job || !job.auth) return send.apply(this, args);
+      // Ask for the project's floating IPs first (with the portal's own credentials), then let the portal's request go.
+      loadProjectFloating(job).then((list) => { job.projectList = list; }, () => {}).then(() => {
+        try { send.apply(this, args); } catch (e) { /* aborted meanwhile */ }
+      });
+    };
     proto.__hlPatched = true;
+  }
+
+  // Every floating IP of the project (the project list is complete where the server's own list is not).
+  async function loadProjectFloating(job) {
+    const project = /\/projects\/(\d+)/.exec(location.pathname);
+    if (!project) return null;
+    const all = [];
+    for (let offset = 0; offset < 1000; offset += 100) {
+      const u = new URL(`/v1/projects/${project[1]}/ips`, job.origin);
+      u.searchParams.append('type[]', 'floating-ip');
+      u.searchParams.set('limit', '100');
+      u.searchParams.set('offset', String(offset));
+      const response = await fetch(u.toString(), { headers: { authorization: job.auth, accept: 'application/json' } });
+      if (!response.ok) return null;
+      const page = await response.json();
+      if (!Array.isArray(page)) return null;
+      all.push(...page);
+      if (page.length < 100) break;
+    }
+    return all;
+  }
+
+  // The portal's list for a server leaves out some floating IPs that are attached to it. This request is marked so
+  // that its response also contains the missing ones (taken from the project list), and its x-total-count agrees.
+  // If anything fails, the portal gets its own answer untouched.
+  function mergeProjectFloating(xhr, proto, job) {
+    xhr.__hlMerge = job;
+    const merged = (list) => (job.projectList ? mergeServerFloating(list, job.projectList, job.serverId) : list);
+    for (const prop of ['response', 'responseText']) {
+      const native = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!native || !native.get) continue;
+      Object.defineProperty(xhr, prop, {
+        configurable: true,
+        get() {
+          const raw = native.get.call(this);
+          try {
+            if (typeof raw === 'string') {
+              const list = JSON.parse(raw);
+              const full = merged(list);
+              return full === list ? raw : JSON.stringify(full);
+            }
+            if (Array.isArray(raw)) return merged(raw);
+          } catch (e) { /* not JSON, leave it */ }
+          return raw;
+        },
+      });
+    }
+    // The response as the browser holds it (an array or a JSON string), not what the getters above report.
+    const rawList = (x) => {
+      const raw = Object.getOwnPropertyDescriptor(proto, 'response').get.call(x);
+      const list = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return Array.isArray(list) ? list : null;
+    };
+    const header = proto.getResponseHeader;
+    Object.defineProperty(xhr, 'getResponseHeader', {
+      configurable: true,
+      value(name) {
+        const value = header.call(this, name);
+        if (!/^x-total-count$/i.test(name) || !job.projectList) return value;
+        try {
+          const list = rawList(this);
+          return list ? String(merged(list).length) : value;
+        } catch (e) { return value; }
+      },
+    });
+    xhr.addEventListener('load', () => {
+      try {
+        const list = rawList(xhr);
+        const extra = list ? merged(list).length - list.length : 0;
+        if (extra > 0) showToast(`Портал не показал ${extra} floating IP этого сервера, добавлены из списка проекта`);
+      } catch (e) { /* not worth a message */ }
+    });
   }
 
   // Replaces what this request reports as its response with the same tickets, newest first, so the portal's own
