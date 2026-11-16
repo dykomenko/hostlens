@@ -1754,17 +1754,22 @@
     // The project-wide page has no floating-IP order button, only the general "order IP" one. There the panel is
     // read-only: select and copy, no Attach/Detach/Terminate/Buy.
     const FIP_PROJECT = '[data-context="view_project_floating_ips"]';
-    const FIP_PROJECT_ORDER = 'button[data-context="order_ip"]';
+    // The project page has no order button either; the bar goes under the page's header row.
+    const FIP_PROJECT_HEADER = '.grid > div.flex.items-center.justify-between';
+    // Card markup: the address is the only <span> with a bold font (the values below it are <div>s); every
+    // "label ... value" row of the card is a .leaders element.
+    const FIP_NAME = 'span.font-semibold';
+    const FIP_LINE = '.leaders';
     const FREE_TARGET = '::free';
     const isLite = () => !!document.querySelector(FIP_PROJECT);
     const fipCards = () => [...document.querySelectorAll('[data-context="floating-ip"]')];
-    const fipAddress = (card) => textOf(card.querySelector('.text-black.font-semibold'));
+    const fipAddress = (card) => textOf(card.querySelector(FIP_NAME));
     const fipAttachButton = (card) => card.querySelector('[data-context="floating-ip_attachment"]'); // only while the IP is free
     // The Target row is the first line of the card's list; its right-hand side holds the server name, or an
     // Attach button while the address is free.
     function fipTarget(card) {
       if (fipAttachButton(card)) return FREE_TARGET;
-      const line = card.querySelector('.divide-y > div');
+      const line = card.querySelector(FIP_LINE);
       const leaves = line ? [...line.querySelectorAll('*')].filter((n) => !n.children.length && !n.closest('button') && textOf(n)) : [];
       const name = leaves.length > 1 ? textOf(leaves[1]) : '';
       return name && !/^attach$/i.test(name) ? name : '';
@@ -1933,7 +1938,7 @@
         document.querySelector(FIP_ORDER).click();
         const modal = await waitFor(() => modalWith('Floating IP Order'), 5000);
         if (!modal || !(await waitFor(() => offerIn(modal), 8000))) break; // wait until the region and price have loaded
-        const order = buttonIn(modal, 'Order');
+        const order = buttonIn(modal, 'Create') || buttonIn(modal, 'Order'); // "Order" before the redesign
         if (!order || order.disabled) break;
         order.click();
         if (!(await waitFor(() => !modalWith('Floating IP Order'), 15000))) break; // the dialog stayed: an error, stop
@@ -2148,8 +2153,8 @@
     function syncFipCards() {
       for (const card of fipCards()) {
         const ip = fipAddress(card);
-        const nameNode = card.querySelector('.text-black.font-semibold');
-        const row = nameNode && nameNode.parentElement && nameNode.parentElement.parentElement;
+        const nameNode = card.querySelector(FIP_NAME);
+        const row = nameNode && nameNode.parentElement; // the address, the portal's copy icon and, after them, ours
         if (!row) continue;
 
         let check = card.querySelector('.hl-fip-check');
@@ -2174,7 +2179,7 @@
         check.checked = fip.selected.has(ip);
 
         // PTR, DNS, DDoS Scrubbing and Tags rarely change; the rows are only marked here and hidden by a class on <html>.
-        for (const line of card.querySelectorAll('.divide-y > div')) {
+        for (const line of card.querySelectorAll(FIP_LINE)) {
           if (!line.classList.contains('hl-fip-meta') && FIP_META_LABELS.test(textOf(line.firstElementChild))) line.classList.add('hl-fip-meta');
         }
       }
@@ -2197,8 +2202,7 @@
       const lite = isLite();
       let order = document.querySelector(FIP_ORDER);
       if (lite) {
-        const general = document.querySelector(FIP_PROJECT_ORDER);
-        order = general && general.closest('div.flex.items-center.justify-between');
+        order = document.querySelector(FIP_PROJECT + ' ' + FIP_PROJECT_HEADER);
       }
       const existing = document.querySelector('.hl-fip');
       if (!order) {
