@@ -631,6 +631,22 @@
       white-space: pre-line; pointer-events: none; opacity: 0; transition: opacity .15s, transform .15s;
     }
     .hl-toast.hl-show { opacity: 1; transform: translate(-50%, 0); }
+
+    /* Cherry's night theme: the portal puts class "dark" on <html> (the switch is at the bottom of the sidebar). */
+    html.dark .hl-fip, html.dark .hl-sup { background: #13161f; border-color: #262b38; color: #e5e7eb; }
+    html.dark .hl-fip-count, html.dark .hl-fip-label, html.dark .hl-fip-status, html.dark .hl-sup-stats, html.dark .hl-month { color: #9ca3af; }
+    html.dark .hl-fip-sep { background: #262b38; }
+    html.dark .hl-fip-progress { background: #262b38; }
+    html.dark .hl-fip-qty, html.dark .hl-sup-select { background: #1b1f2b; border-color: #374151; color: #e5e7eb; color-scheme: dark; }
+    html.dark .hl-fip-btn, html.dark .hl-copy, html.dark .hl-sup-btn { background: #1b1f2b; border-color: #374151; color: #d1d5db; }
+    html.dark .hl-fip-btn:hover:not(:disabled), html.dark .hl-copy:hover, html.dark .hl-sup-btn:hover { background: #262b38; border-color: #4b5563; }
+    html.dark .hl-copy.hl-ok { background: rgba(34, 197, 94, .18); border-color: rgba(34, 197, 94, .6); color: #86efac; }
+    html.dark .hl-fip-danger { border-color: #7f1d1d; color: #fca5a5; }
+    html.dark .hl-fip-danger:hover:not(:disabled) { background: rgba(239, 68, 68, .15); border-color: #ef4444; }
+    html.dark .hl-fip-confirm { background: rgba(245, 158, 11, .12); border-color: rgba(245, 158, 11, .45); color: #fde68a; }
+    html.dark .hl-fip-progress > i { background: #3b82f6; }
+    html.dark .hl-fip-check { color-scheme: dark; }
+    html.dark .hl-toast { background: #1b1f2b; border: 1px solid #374151; }
   `;
 
   function injectStyles() {
