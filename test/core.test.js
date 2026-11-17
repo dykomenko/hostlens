@@ -386,3 +386,44 @@ test('cherryBilling copes with missing data', () => {
   const empty = core.cherryBilling({ servers: null, credit: null, today });
   assert.deepEqual(empty, { rows: [], balance: null, notes: [] });
 });
+
+test('top-up slider: positions map to rounded amounts and back', () => {
+  const max = 100000; // 1000.00
+  assert.equal(core.topUpFromSlider(0, max), 0);
+  assert.equal(core.topUpFromSlider(1, max), 100000);
+  assert.equal(core.topUpFromSlider(0.5, max), 25000); // 250: step 50
+  assert.equal(core.topUpFromSlider(0.1, max), 1000); // 10
+  assert.equal(core.topUpFromSlider(0.2, 2500000), 100000); // 25 000 * 0.04 = 1000
+  for (const cents of [0, 1000, 25000, 100000]) {
+    const back = core.topUpFromSlider(core.sliderFromTopUp(cents, max), max);
+    assert.equal(back, cents);
+  }
+  assert.equal(core.sliderFromTopUp(5, 0), 0);
+  assert.equal(core.sliderFromTopUp(200000, max), 1);
+});
+
+test('coverage: more balance moves the first outage later', () => {
+  const today = new Date(2026, 10, 17);
+  const rows = [
+    { name: 'a', status: '', expire: '2026-11-20', cost: '10 EUR / Month' },
+    { name: 'b', status: '', expire: '2026-11-25', cost: '20 EUR / Month' },
+  ];
+  const balance = { cents: 500, currency: '€' };
+  const { items } = core.analyze(rows, { today, months: 1, balance });
+  const none = core.coverage(items, balance, 0, today);
+  assert.equal(none.outage.getDate(), 20);
+  assert.equal(none.short, 500);
+  const some = core.coverage(items, balance, 500, today); // 10: pays a, then b is short by 20
+  assert.equal(some.outage.getDate(), 25);
+  assert.deepEqual(some.names, ['b']);
+  assert.equal(some.short, 2000);
+  const lots = core.coverage(items, balance, 10000, today);
+  assert.ok(lots.outage > new Date(2027, 0, 1)); // 105 EUR pays 30 a month: lasts into February
+  assert.equal(core.coverAllCents(items, today, 1, '€'), 3000);
+
+  const text = core.coverageText(some, today, '€');
+  assert.match(text.head, /^хватит до 25\.11\.2026 · 8 дней$/);
+  assert.match(text.tail, /не хватит на: b; нужно ещё/);
+  assert.equal(core.coverageText(null, today, '€'), null);
+  assert.match(core.coverageText({ outage: null, short: 0, names: [] }, today, '€').head, /хватит на 3\+ года/);
+});

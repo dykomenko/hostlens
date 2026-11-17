@@ -195,6 +195,50 @@
     return { outage: null, short: 0, names: [] };
   }
 
+  /* ---- the top-up slider: "if I add this much, how long does everything live?" ---- */
+
+  // How long the balance lasts after adding `topUpCents` (same result as `runway`).
+  const coverage = (items, balance, topUpCents, today) =>
+    runway(items, { today, balance: { cents: balance.cents + topUpCents, currency: balance.currency } });
+
+  // What it takes, in total, for every service to live until today + `months`.
+  function coverAllCents(items, today, months, currency) {
+    const horizon = addMonths(today, months);
+    let total = 0;
+    for (const { expire, cost } of items) {
+      if (!expire || cost.period.once || !cost.cents) continue;
+      if (currency && cost.currency && currency !== cost.currency) continue;
+      total += renewalsNeeded(expire, cost.period, today, horizon) * cost.cents;
+    }
+    return total;
+  }
+
+  // The slider is not linear: small sums need fine steps, big ones do not. position 0..1 -> cents, rounded to a
+  // sensible step (10 up to 200, 50 up to 1000, 100 up to 5000, 500 above).
+  const TOPUP_STEPS = [[200, 10], [1000, 50], [5000, 100], [Infinity, 500]];
+  const topUpStep = (units) => TOPUP_STEPS.find(([limit]) => units < limit)[1];
+
+  function topUpFromSlider(position, maxCents) {
+    const units = (maxCents / 100) * position * position;
+    const step = topUpStep(units);
+    return Math.round(units / step) * step * 100;
+  }
+
+  const sliderFromTopUp = (cents, maxCents) => (maxCents > 0 ? Math.min(1, Math.sqrt(Math.max(0, cents) / maxCents)) : 0);
+
+  // Words for a `coverage` result: { head, tail }.
+  function coverageText(result, today, currency) {
+    if (!result) return null;
+    if (!result.outage) return { head: `хватит на ${RUNWAY_MONTHS / 12}+ года, все продления покрыты`, tail: '' };
+    const days = daysBetween(result.outage, today);
+    const extra = result.names.length - 2;
+    const names = result.names.slice(0, 2).join(', ') + (extra > 0 ? ` и ещё ${extra}` : '');
+    return {
+      head: `хватит до ${formatDate(result.outage)} · ${days <= 0 ? 'сегодня' : `${days} ${plural(days, 'день', 'дня', 'дней')}`}`,
+      tail: `дальше не хватит на: ${names}; нужно ещё ${formatMoney(result.short, currency)}`,
+    };
+  }
+
   const sumInto = (map, key, value) => {
     map[key] = (map[key] || 0) + value;
   };
@@ -522,7 +566,7 @@
       formatMoney, formatMoneyMap, formatDate, plural, daysUntil,
       extractIps, parseTrafficValue, subnetHosts, formatNetplan, formatIpList, widenIpsUrl, uniqueNames,
       widenTicketsUrl, isTicketsUrl, sortTicketsNewestFirst, serverFloatingRequest, mergeServerFloating,
-      cherryBilling,
+      cherryBilling, coverage, coverAllCents, topUpFromSlider, sliderFromTopUp, coverageText,
     };
     return;
   }
@@ -557,6 +601,7 @@
   const state = {
     months: HORIZONS.includes(savedMonths) ? savedMonths : 1,
     open: store.get('open', false) === true,
+    topUp: Math.max(0, Number(store.get('topUp', 0)) || 0), // the slider's amount, in cents
   };
 
   const STYLE = `
@@ -583,6 +628,17 @@
       background: transparent; border: 1px solid rgba(127, 127, 127, .45); border-radius: 4px;
     }
     .${PANEL_CLASS} .hl-warn { margin-top: 8px; color: var(--isp-text-warning, #b26a00); font-size: 12px; }
+    .${PANEL_CLASS} .hl-topup {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 12px; padding-top: 10px;
+      border-top: 1px dashed rgba(127, 127, 127, .35);
+    }
+    .${PANEL_CLASS} .hl-range { flex: 0 1 340px; min-width: 160px; margin: 0; cursor: pointer; accent-color: #2563eb; }
+    .${PANEL_CLASS} .hl-topup-input {
+      width: 92px; padding: 2px 6px; font: inherit; color: inherit; background: transparent;
+      border: 1px solid rgba(127, 127, 127, .45); border-radius: 4px;
+    }
+    .${PANEL_CLASS} .hl-topup-result { flex: 1 1 260px; min-width: 0; }
+    .${PANEL_CLASS} .hl-topup-head { font-weight: 600; font-variant-numeric: tabular-nums; }
     .${PANEL_CLASS} .hl-details { display: none; margin-top: 10px; max-height: 40vh; overflow: auto; }
     .${PANEL_CLASS}.hl-open .hl-details { display: block; }
     .${PANEL_CLASS} .hl-table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
@@ -699,7 +755,9 @@
     html.dark .${PANEL_CLASS}.hl-cherry .hl-value--due { color: #f87171; }
     html.dark .${PANEL_CLASS}.hl-cherry .hl-toggle { color: #60a5fa; }
     html.dark .${PANEL_CLASS}.hl-cherry .hl-warn { color: #fbbf24; }
-    html.dark .${PANEL_CLASS}.hl-cherry .hl-select { color-scheme: dark; border-color: #374151; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-select, html.dark .${PANEL_CLASS}.hl-cherry .hl-topup-input { color-scheme: dark; border-color: #374151; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-range { color-scheme: dark; accent-color: #3b82f6; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-topup { border-top-color: #262b38; }
     html.dark .${PANEL_CLASS}.hl-cherry .hl-table th, html.dark .${PANEL_CLASS}.hl-cherry .hl-table td { border-bottom-color: #262b38; }
 
     /* Cherry's night theme: the portal puts class "dark" on <html> (the switch is at the bottom of the sidebar). */
@@ -830,6 +888,44 @@
       h('div', { class: 'hl-sub' }, `не хватит на: ${names}`));
   }
 
+  // The slider under the tiles: drag to pick a top-up amount, see how long that keeps everything alive.
+  // Dragging only updates the text next to it, so the panel is not redrawn under the user's finger.
+  function topUpControl(model, balance, today) {
+    if (!balance || !model.runway || !model.runway.outage) return null; // nothing to cover
+    const currency = balance.currency;
+    const toYear = Math.max(0, coverAllCents(model.items, today, 12, currency) - balance.cents);
+    const maxCents = Math.max(toYear, 10000);
+
+    const range = h('input', { type: 'range', class: 'hl-range', min: 0, max: 1000, step: 1, 'aria-label': 'Сумма пополнения' });
+    const input = h('input', { type: 'number', class: 'hl-topup-input', min: 0, step: 10, 'aria-label': 'Сумма пополнения' });
+    const head = h('div', { class: 'hl-topup-head' });
+    const tail = h('div', { class: 'hl-sub' });
+
+    const update = (cents, source) => {
+      state.topUp = cents;
+      store.set('topUp', cents);
+      if (source !== 'range') range.value = String(Math.round(1000 * sliderFromTopUp(cents, maxCents)));
+      if (source !== 'input') input.value = String(cents / 100);
+      const text = coverageText(coverage(model.items, balance, cents, today), today, currency);
+      head.textContent = `Баланс ${formatMoney(balance.cents + cents, currency)}: ${text ? text.head : 'нечего считать'}`;
+      tail.textContent = text ? text.tail : '';
+    };
+    range.addEventListener('input', () => update(topUpFromSlider(Number(range.value) / 1000, maxCents), 'range'));
+    input.addEventListener('input', () => update(Math.max(0, Math.round((parseFloat(input.value) || 0) * 100)), 'input'));
+
+    const need = model.topUp[currency] > 0 ? model.topUp[currency] : 0;
+    const full = need
+      ? h('button', { type: 'button', class: 'hl-toggle', title: 'Столько, чтобы всё дожило до выбранной даты', onclick: () => update(need, 'preset') },
+        `на ${state.months} мес: ${formatMoney(need, currency)}`)
+      : null;
+
+    update(state.topUp, 'init');
+    return h('div', { class: 'hl-topup' },
+      h('div', { class: 'hl-label' }, 'Если пополнить на'),
+      range, input, h('span', { class: 'hl-label' }, currency), full,
+      h('div', { class: 'hl-topup-result' }, head, tail));
+  }
+
   // view: { model, balance, today, notes: [string] }
   function renderPanel(panel, view) {
     const { model, balance, today, notes } = view;
@@ -924,6 +1020,7 @@
     panel.classList.toggle('hl-open', state.open);
     panel.replaceChildren(
       h('div', { class: 'hl-row' }, tiles, h('div', { class: 'hl-spacer' }), toggle),
+      ...[topUpControl(model, balance, today)].filter(Boolean),
       ...warnings.map((w) => h('div', { class: 'hl-warn' }, `⚠ ${w}`)),
       details,
     );
