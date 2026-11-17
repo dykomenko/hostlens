@@ -232,8 +232,9 @@
 
       if (recurring) sumInto(monthly, cost.currency, cost.cents / periodInMonths(cost.period));
       if (dueCents) sumInto(due, cost.currency, dueCents);
-      if (recurring && expire && (!nextExpiry || expire < nextExpiry)) nextExpiry = expire;
-      items.push({ name: row.name, note: row.note, expire, cost, renewals, dueCents });
+      // `continuous` rows (hourly billing) have no renewal date to speak of, so they never count as "the nearest one".
+      if (recurring && expire && !row.continuous && (!nextExpiry || expire < nextExpiry)) nextExpiry = expire;
+      items.push({ name: row.name, note: row.note, expire, cost, renewals, dueCents, continuous: !!row.continuous });
     }
 
     const topUp = {};
@@ -467,6 +468,53 @@
     return extra.length ? serverList.concat(extra) : serverList;
   }
 
+  // Cherry Servers: what the portal's API knows about money, turned into the rows `analyze` takes.
+  // servers: GET /v1/projects/<id>/servers (pricing, plan, termination_date), credit: GET /v1/teams/<id> -> credit.
+  // Fixed-term servers are charged on pricing.next_payment_at; everything billed by the hour (floating IPs, subnets,
+  // storage...) is one number in credit.resources.pricing, which becomes a daily row so the balance runs down with it.
+  function cherryBilling({ servers, credit, today }) {
+    const rows = [];
+    const notes = [];
+    let ending = 0;
+    for (const server of servers || []) {
+      const pricing = server && server.pricing;
+      if (!pricing || /^hourly/i.test(pricing.unit || '')) continue; // hourly servers are part of the hourly total below
+      if (server.termination_date && server.termination_date !== 'None') {
+        ending++; // will be removed on its own: nothing to renew
+        continue;
+      }
+      const plan = server.plan && (server.plan.title || server.plan.name);
+      rows.push({
+        name: server.hostname || server.name || String(server.id),
+        note: [plan, pricing.auto_renewal ? 'автопродление' : ''].filter(Boolean).join(' · '),
+        status: '',
+        expire: pricing.next_payment_at,
+        cost: `${pricing.price_total} ${pricing.currency} / ${pricing.unit}`,
+      });
+    }
+
+    const resources = credit && credit.resources && credit.resources.pricing;
+    if (resources && resources.price > 0) {
+      const ymd = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`;
+      rows.push({
+        name: 'Почасовые ресурсы',
+        note: `${resources.price} ${resources.currency}/ч: IP, подсети, диски и др.`,
+        status: '',
+        expire: ymd,
+        cost: `${(resources.price * 24).toFixed(2)} ${resources.currency} / День`,
+        continuous: true,
+      });
+    }
+    if (ending) notes.push(`Серверы с назначенным удалением не учтены: ${ending}.`);
+
+    const account = credit && credit.account;
+    const promo = (credit && credit.promo && credit.promo.remaining) || 0;
+    const balance = account && Number.isFinite(account.remaining)
+      ? { cents: Math.round((account.remaining + promo) * 100), currency: normalizeCurrency(account.currency) }
+      : null;
+    return { rows, balance, notes };
+  }
+
   if (typeof module !== 'undefined' && typeof document === 'undefined') {
     // Loaded by the unit tests in Node, not by Tampermonkey.
     module.exports = {
@@ -474,6 +522,7 @@
       formatMoney, formatMoneyMap, formatDate, plural, daysUntil,
       extractIps, parseTrafficValue, subnetHosts, formatNetplan, formatIpList, widenIpsUrl, uniqueNames,
       widenTicketsUrl, isTicketsUrl, sortTicketsNewestFirst, serverFloatingRequest, mergeServerFloating,
+      cherryBilling,
     };
     return;
   }
@@ -631,6 +680,27 @@
       white-space: pre-line; pointer-events: none; opacity: 0; transition: opacity .15s, transform .15s;
     }
     .hl-toast.hl-show { opacity: 1; transform: translate(-50%, 0); }
+
+    /* The totals panel on Cherry's servers page: a card like the portal's own, light and night. */
+    .${PANEL_CLASS}.hl-cherry {
+      margin: 24px 0 0; padding: 16px 20px; border: 1px solid #dbe3f0; border-radius: 12px; background: #fff; color: #172554;
+      font-family: inherit;
+    }
+    .${PANEL_CLASS}.hl-cherry .hl-label, .${PANEL_CLASS}.hl-cherry .hl-sub, .${PANEL_CLASS}.hl-cherry .hl-table th,
+    .${PANEL_CLASS}.hl-cherry .hl-table .hl-muted { color: #64748b; }
+    .${PANEL_CLASS}.hl-cherry .hl-value--ok { color: #15803d; }
+    .${PANEL_CLASS}.hl-cherry .hl-value--due { color: #dc2626; }
+    .${PANEL_CLASS}.hl-cherry .hl-toggle { color: #2563eb; }
+    .${PANEL_CLASS}.hl-cherry .hl-warn { color: #b45309; }
+    html.dark .${PANEL_CLASS}.hl-cherry { background: #13161f; border-color: #262b38; color: #e5e7eb; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-label, html.dark .${PANEL_CLASS}.hl-cherry .hl-sub,
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-table th, html.dark .${PANEL_CLASS}.hl-cherry .hl-table .hl-muted { color: #9ca3af; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-value--ok { color: #4ade80; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-value--due { color: #f87171; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-toggle { color: #60a5fa; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-warn { color: #fbbf24; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-select { color-scheme: dark; border-color: #374151; }
+    html.dark .${PANEL_CLASS}.hl-cherry .hl-table th, html.dark .${PANEL_CLASS}.hl-cherry .hl-table td { border-bottom-color: #262b38; }
 
     /* Cherry's night theme: the portal puts class "dark" on <html> (the switch is at the bottom of the sidebar). */
     html.dark .hl-fip, html.dark .hl-sup { background: #13161f; border-color: #262b38; color: #e5e7eb; }
@@ -843,9 +913,9 @@
           h('th', { class: 'hl-num' }, 'К оплате'))),
         h('tbody', {}, sorted.map((item) => h('tr', {},
           h('td', {}, item.name, item.note && h('span', { class: 'hl-muted' }, `  ${item.note}`)),
-          h('td', {}, item.expire ? formatDate(item.expire) : '—'),
-          h('td', { class: 'hl-num' }, formatMoney(item.cost.cents, item.cost.currency)),
-          h('td', { class: 'hl-num' }, String(item.renewals)),
+          h('td', {}, item.continuous ? 'по часам' : item.expire ? formatDate(item.expire) : '—'),
+          h('td', { class: 'hl-num' }, item.continuous ? `${formatMoney(item.cost.cents, item.cost.currency)} / сут` : formatMoney(item.cost.cents, item.cost.currency)),
+          h('td', { class: 'hl-num' }, item.continuous ? `${item.renewals} сут` : String(item.renewals)),
           h('td', { class: 'hl-num' }, item.dueCents ? formatMoney(item.dueCents, item.cost.currency) : '—')))),
         h('tfoot', {}, h('tr', {},
           h('td', { colspan: 4 }, 'Итого к оплате'),
@@ -860,11 +930,11 @@
   }
 
   // Puts (or updates) the panel right after `anchor`; skips the redraw when nothing changed.
-  function mountPanel(anchor, view, { block = false } = {}) {
+  function mountPanel(anchor, view, { block = false, extraClass = '' } = {}) {
     const next = anchor.nextElementSibling;
     let panel = next && next.classList.contains(PANEL_CLASS) ? next : null;
     if (!panel) {
-      panel = h('div', { class: PANEL_CLASS + (block ? ' hl-block' : ''), role: 'region', 'aria-label': 'Итоги по услугам' });
+      panel = h('div', { class: PANEL_CLASS + (block ? ' hl-block' : '') + (extraClass ? ' ' + extraClass : ''), role: 'region', 'aria-label': 'Итоги по услугам' });
       anchor.after(panel);
     }
     const signature = JSON.stringify([view, state.open]);
@@ -1529,6 +1599,11 @@
   const FIP_PAGE_LIMIT = 100;
   const listing = { total: null };
 
+  // The portal's API is called with the same credentials the portal itself sends: the Authorization header of its
+  // own requests is remembered here (in memory only) and used for read-only GETs to the same host, nothing else.
+  const CHERRY_API = 'https://api.cherryservers.com';
+  const cherryApi = { auth: null };
+
   function patchFloatingListing() {
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const proto = page.XMLHttpRequest && page.XMLHttpRequest.prototype;
@@ -1537,6 +1612,7 @@
     proto.open = function (method, url, ...rest) {
       try {
         const u = new URL(url, location.href);
+        if (u.origin === CHERRY_API) this.__hlApi = true;
         if (/\/v1\/(servers|projects)\/\d+\/ips$/.test(u.pathname)) {
           listing.total = null;
           const serverId = serverFloatingRequest(url, location.href);
@@ -1562,6 +1638,7 @@
     const send = proto.send;
     const setHeader = proto.setRequestHeader;
     proto.setRequestHeader = function (name, value) {
+      if (this.__hlApi && /^authorization$/i.test(name)) cherryApi.auth = value;
       if (this.__hlMerge && /^authorization$/i.test(name)) this.__hlMerge.auth = value;
       return setHeader.apply(this, arguments);
     };
@@ -1719,7 +1796,66 @@
       return button;
     }
 
+    /* ------------------------------------------------------------------ *
+     * Billing panel under the project's server list: what the services cost, what it takes to keep them all
+     * running, how long the team credit lasts. Same panel as on the other sites, fed from the portal's API.
+     * ------------------------------------------------------------------ */
+
+    const BILLING_TTL = 2 * 60 * 1000;
+    const billing = { team: null, data: null, at: 0, loading: false, failed: 0 };
+
+    async function cherryGet(path) {
+      const response = await fetch(CHERRY_API + path, { headers: { authorization: cherryApi.auth, accept: 'application/json' } });
+      if (!response.ok) throw new Error(`${path.split('?')[0]}: ${response.status}`);
+      return response.json();
+    }
+
+    // The team's credit pays for every project of the team, so every project's servers are counted.
+    async function loadCherryBilling(team) {
+      const [info, projects] = await Promise.all([cherryGet(`/v1/teams/${team}`), cherryGet(`/v1/teams/${team}/projects`)]);
+      const servers = [];
+      for (const project of projects) {
+        for (let offset = 0; offset < 2000; offset += 100) {
+          const page = await cherryGet(`/v1/projects/${project.id}/servers?fields=id,hostname,name,plan,pricing,termination_date&limit=100&offset=${offset}`);
+          servers.push(...page);
+          if (page.length < 100) break;
+        }
+      }
+      return { credit: info.credit, servers };
+    }
+
+    function scanBilling() {
+      // The page has two view_project_servers blocks (the project overview and the list); the list is the one with
+      // the search field. The panel goes right under it, below the pager.
+      const view = [...document.querySelectorAll('[data-context="view_project_servers"]')].find((v) => v.querySelector('input'));
+      const anchor = view && view.querySelector('.max-w-screen-2xl > .grid');
+      const team = /\/teams\/(\d+)/.exec(location.pathname);
+      for (const panel of document.querySelectorAll('.hl-cherry')) {
+        if (!anchor || panel.previousElementSibling !== anchor) panel.remove(); // left behind by another page or layout
+      }
+      if (!anchor || !team) return;
+      if (cherryApi.auth && !billing.loading && (billing.team !== team[1] || Date.now() - billing.at > BILLING_TTL) && billing.failed < 3) {
+        billing.loading = true;
+        loadCherryBilling(team[1]).then(
+          (data) => { Object.assign(billing, { team: team[1], data, at: Date.now(), failed: 0 }); },
+          (err) => { billing.failed++; console.error('[hostlens] billing', err); },
+        ).finally(() => {
+          billing.loading = false;
+          refreshPanels();
+        });
+      }
+      if (!billing.data || billing.team !== team[1]) return;
+      const today = startOfDay(new Date());
+      const { rows, balance, notes } = cherryBilling({ ...billing.data, today });
+      mountPanel(anchor, { model: analyze(rows, { today, months: state.months, balance }), balance, today, notes }, { block: true, extraClass: 'hl-cherry' });
+    }
+
     function scan() {
+      try {
+        scanBilling();
+      } catch (e) { // the other Cherry features must not depend on the billing panel
+        console.error('[hostlens] billing', e);
+      }
       scanFloatingIps();
       try {
         scanSupport();
@@ -1751,7 +1887,7 @@
      * Floating IPs: select several cards and attach / detach / terminate them in one go,
      * order N at once, copy addresses for netplan, and make the termination phrase usable.
      * The portal's own buttons do the work (it reloads the whole list after every action), so
-     * the script only drives them: nothing here talks to the API or touches the session token.
+     * the script only drives them: attach, detach, terminate and order never go through the API directly.
      * ------------------------------------------------------------------ */
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -2467,7 +2603,7 @@
       });
     }
     applyFipMeta();
-    watchPage(scan, 200);
+    refreshPanels = watchPage(scan, 200);
   }
 
   /* ------------------------------------------------------------------ */

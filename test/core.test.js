@@ -349,3 +349,40 @@ test('mergeServerFloating appends the project\'s floating IPs attached to the se
   assert.equal(core.mergeServerFloating(serverList, null, '42'), serverList);
   assert.equal(core.mergeServerFloating({ not: 'a list' }, project, '42').not, 'a list');
 });
+
+test('cherryBilling: fixed-term servers by next_payment_at, hourly resources as a daily row, credit as balance', () => {
+  const today = new Date(2026, 10, 17);
+  const servers = [
+    { hostname: 'alpha', plan: { title: 'Cloud VDS 2' }, pricing: { price_total: 49, currency: 'EUR', unit: '1 Month', next_payment_at: '2026-12-06T07:16:00+00:00', auto_renewal: false } },
+    { hostname: 'beta', plan: { title: 'AMD Ryzen 9950X' }, pricing: { price_total: 259, currency: 'EUR', unit: 'Monthly', next_payment_at: '2026-11-24T02:12:00+00:00', auto_renewal: true } },
+    { hostname: 'gone', pricing: { price_total: 13, currency: 'EUR', unit: 'Monthly', next_payment_at: '2026-12-01' }, termination_date: '2026-11-30' },
+    { hostname: 'hourly-box', pricing: { price_total: 0.02, currency: 'EUR', unit: 'Hourly' } },
+  ];
+  const credit = {
+    account: { remaining: 10.38, currency: 'EUR' },
+    promo: { remaining: 2, currency: 'EUR' },
+    resources: { pricing: { price: 0.588, currency: 'EUR', unit: 'Hourly' } },
+  };
+  const { rows, balance, notes } = core.cherryBilling({ servers, credit, today });
+  assert.deepEqual(rows.map((r) => r.name), ['alpha', 'beta', 'Почасовые ресурсы']);
+  assert.equal(rows[0].cost, '49 EUR / 1 Month');
+  assert.equal(rows[1].note, 'AMD Ryzen 9950X · автопродление');
+  assert.equal(rows[2].cost, '14.11 EUR / День');
+  assert.equal(rows[2].expire, '2026-11-17');
+  assert.equal(rows[2].continuous, true);
+  assert.deepEqual(balance, { cents: 1238, currency: '€' });
+  assert.equal(notes.length, 1);
+
+  const model = core.analyze(rows, { today, months: 1, balance });
+  assert.equal(model.items.length, 3);
+  // 49 + 259 per month, plus 14.11 a day for 30 days
+  assert.equal(model.monthly['€'], 4900 + 25900 + 1411 * 30);
+  assert.equal(model.nextExpiry.getDate(), 24); // the hourly row is never "the nearest renewal"
+  assert.equal(model.runway.outage.getTime(), today.getTime()); // 12.38 does not cover a day of hourly resources
+});
+
+test('cherryBilling copes with missing data', () => {
+  const today = new Date(2026, 10, 17);
+  const empty = core.cherryBilling({ servers: null, credit: null, today });
+  assert.deepEqual(empty, { rows: [], balance: null, notes: [] });
+});
